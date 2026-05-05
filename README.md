@@ -70,11 +70,170 @@ Required packages:
 ## Physical Setup
 
 1. Build a matte-black cuboid box (3D printed or CNC machined).
-2. Print ArUco markers (DICT_4X4_50 recommended). Measure actual printed size with calipers — printers have 0.5–1% scaling error.
-3. Attach markers to box faces. Measure each marker's corner positions in the box coordinate frame to ≤ 0.1 mm.
-4. Enter corner positions into `config/box.yaml` (in mm, box frame).
-5. Place 3–4 USB webcams on rigid tripods with ≥ 90° angular spread around the box.
-6. Set up diffuse, uniform lighting (softbox or diffuse panel). Lock white balance on all cameras.
+2. Print ArUco markers (DICT_4X4_50 recommended). Measure actual printed side length with calipers — printers have 0.5–1% scaling error. Enter the measured value as `marker_side_mm` in `box.yaml`.
+3. Attach markers to box faces (see placement guide below).
+4. Place 3–4 USB webcams on rigid tripods with ≥ 90° angular spread around the box.
+5. Set up diffuse, uniform lighting (softbox or diffuse panel). Lock white balance on all cameras.
+
+---
+
+## Marker Placement Guide
+
+### Box coordinate frame
+
+The software defines the box origin at the **front-bottom-left corner**:
+
+```
+         top (Y = height)
+          ___________
+         /           /|
+        /     top   / |
+       /___________/  |  ← back face (Z = depth)
+       |           |  |
+ left  |           | /  ← right face (X = width)
+ face  |   FRONT   |/
+       |___________|
+       ^
+       origin (0, 0, 0)   front-bottom-left
+
+   X →  (left to right, width)
+   Y ↑  (bottom to top, height)
+   Z ↗  (front to back, depth)
+```
+
+The ball is suspended inside the box. Cameras look in through the open face or gaps.
+
+---
+
+### Side face markers (IDs 0–3)
+
+Put **one marker per side face**, centred on the face. The default config centres automatically — you only need to measure the box dimensions and marker size.
+
+```
+         ┌─────────────┐
+         │   BACK (2)  │
+    ┌────┤             ├────┐
+    │    │             │    │
+LEFT│ 3  │   (inside)  │  1 │RIGHT
+    │    │             │    │
+    └────┤             ├────┘
+         │  FRONT (0)  │
+         └─────────────┘
+```
+
+**Which face gets which ID:**
+
+| ID | Face  | Description                                 |
+|----|-------|---------------------------------------------|
+| 0  | front | The face you face when looking at the box   |
+| 1  | right | Right side when looking at the front        |
+| 2  | back  | Opposite to front                           |
+| 3  | left  | Left side when looking at the front         |
+
+**Placement rule for side markers:**
+- Centre the marker horizontally and vertically on its face.
+- The marker must be fully visible to at least one camera.
+- Keep the marker flat — bubbles or curl degrade corner detection.
+- Minimum marker size in the image: 50 px per side at typical camera distance.
+
+---
+
+### Top face markers (IDs 4–7)
+
+The top face can hold up to 4 markers, one per quadrant. Having top markers is critical because they are simultaneously visible to multiple cameras, giving strong pose constraints.
+
+```
+   Top face (viewed from above)
+   ┌──────────┬──────────┐
+   │          │          │  ← back of box (Z = depth)
+   │  ID 6    │  ID 7    │
+   │          │          │
+   ├──────────┼──────────┤
+   │          │          │
+   │  ID 4    │  ID 5    │
+   │          │          │  ← front of box (Z = 0)
+   └──────────┴──────────┘
+   left (X=0)         right (X=width)
+```
+
+**Quadrant centres** for a 120 × 120 mm top face with 30 mm markers
+(10 mm margin from edges, ~5 mm gap between markers):
+
+| ID | Quadrant     | center_box_mm        |
+|----|--------------|----------------------|
+| 4  | front-left   | `[30, height, 30]`   |
+| 5  | front-right  | `[90, height, 30]`   |
+| 6  | back-left    | `[30, height, 90]`   |
+| 7  | back-right   | `[90, height, 90]`   |
+
+Scale these proportionally for other box sizes.
+
+---
+
+### Minimum viable marker set
+
+| Cameras | Minimum markers needed | Recommended |
+|---------|----------------------|-------------|
+| 3       | 1 side + 2 top       | 4 side + 4 top |
+| 4       | 2 side + 1 top       | 4 side + 4 top |
+
+The solver requires ≥ 3 markers from ≥ 2 different faces per frame. More markers = better pose accuracy. **Never rely on a single face only** — single-face pose has a flip ambiguity.
+
+---
+
+### Configuring box.yaml (no manual corner measurement needed)
+
+Just fill in box size, marker size, and which ID is on which face:
+
+```yaml
+box_dimensions:
+  width_mm:  120.0    # measure with calipers
+  depth_mm:  120.0
+  height_mm:  60.0
+
+marker_side_mm: 29.8  # measure printed size with calipers — NOT design size
+
+markers:
+  - id: 0
+    face: front        # centred automatically
+
+  - id: 1
+    face: right
+
+  - id: 2
+    face: back
+
+  - id: 3
+    face: left
+
+  - id: 4
+    face: top
+    center_box_mm: [30.0, 60.0, 30.0]   # front-left quadrant
+
+  - id: 5
+    face: top
+    center_box_mm: [90.0, 60.0, 30.0]   # front-right quadrant
+
+  - id: 6
+    face: top
+    center_box_mm: [30.0, 60.0, 90.0]   # back-left quadrant
+
+  - id: 7
+    face: top
+    center_box_mm: [90.0, 60.0, 90.0]   # back-right quadrant
+```
+
+The software computes all 4 corner positions per marker automatically. You do **not** need to measure individual corner coordinates unless your markers are off-centre, in which case add `center_box_mm: [x, y, z]` with the actual centre measured in box frame.
+
+---
+
+### Physical attachment tips
+
+- Use **matte-finish lamination** or print directly on matte paper. Glossy surfaces create specular reflections that break corner detection.
+- Glue flat — any warp larger than ~1 mm degrades the pose estimate.
+- After gluing, verify flatness with a straight-edge.
+- **Do not cover any part of the white border** around the marker — ArUco needs it.
+- Leave ≥ 10 mm clearance from box edges so corners are not clipped in camera images.
 
 ---
 
@@ -83,9 +242,10 @@ Required packages:
 ### Step 0 — Configure
 
 Edit `config/box.yaml`:
-- Set `box_dimensions` (mm).
-- Fill in `markers` — each marker's 4 corner positions in box frame (mm).
-- Set `box_to_sim` transform (rotation + translation from box frame to simulator frame in meters). This is the physical placement of the box above the transducer array.
+- Set `box_dimensions` (mm) — measure with calipers.
+- Set `marker_side_mm` — measure the **printed** marker size with calipers, not the design file value.
+- List markers with `face` and `id`. Corner positions are computed automatically. For top-face markers add `center_box_mm: [x, y, z]` (see Marker Placement Guide above).
+- Set `box_to_sim` transform — rotation + translation from box frame to simulator frame (meters). Describes where the box sits above the transducer array.
 
 Edit `config/cameras.yaml`:
 - Add one entry per camera with ID, serial, intrinsics file path, resolution, and exposure.

@@ -1,95 +1,75 @@
 # Box configuration for acoustic levitation measurement system.
-# All marker positions are in the box coordinate frame (mm).
-# Box frame origin: front-bottom-left corner.
-# X: left→right, Y: bottom→top, Z: front→back (depth into box).
+#
+# Box coordinate frame:
+#   Origin: front-bottom-left corner
+#   X: left→right (width)
+#   Y: bottom→top (height)
+#   Z: front→back (depth)
+#
+# You only need to provide box dimensions, marker size, and which ID goes on
+# which face. Corner positions are computed automatically.
+# For non-centered placement, add:  center_box_mm: [x, y, z]
+# For exact legacy control, add:    corners_box_frame: [[x,y,z], ...]  (4 corners, mm)
 
 box_dimensions:
-  width_mm: 120.0
-  depth_mm: 120.0
-  height_mm: 60.0
+  width_mm:  120.0
+  depth_mm:  120.0
+  height_mm:  60.0
 
 aruco_dictionary: DICT_4X4_50
 
-# Marker side length as printed and measured with calipers (mm).
+# Actual printed marker side length measured with calipers (mm).
+# Printers commonly have 0.5–1% scaling error — measure, don't trust the design file.
 marker_side_mm: 30.0
 
-# Each marker's 4 corners in box frame (mm), listed in ArUco canonical order:
-#   top-left, top-right, bottom-right, bottom-left
-# (when the marker is viewed from outside the box, i.e. from the camera side)
+# One entry per marker.
+# Minimal form  →  just face + id, marker auto-centred on that face.
+# Custom centre →  add  center_box_mm: [x, y, z]  (overrides auto-centre).
 markers:
+  # ── Side faces (one marker each, centred) ───────────────────────────────
   - id: 0
-    face: front      # Z=0 face
-    corners_box_frame:
-      - [15.0,  45.0, 0.0]
-      - [45.0,  45.0, 0.0]
-      - [45.0,  15.0, 0.0]
-      - [15.0,  15.0, 0.0]
+    face: front
 
   - id: 1
-    face: right      # X=width face
-    corners_box_frame:
-      - [120.0, 45.0, 15.0]
-      - [120.0, 45.0, 45.0]
-      - [120.0, 15.0, 45.0]
-      - [120.0, 15.0, 15.0]
+    face: right
 
   - id: 2
-    face: back       # Z=depth face
-    corners_box_frame:
-      - [105.0, 45.0, 120.0]
-      - [75.0,  45.0, 120.0]
-      - [75.0,  15.0, 120.0]
-      - [105.0, 15.0, 120.0]
+    face: back
 
   - id: 3
-    face: left       # X=0 face
-    corners_box_frame:
-      - [0.0, 45.0, 105.0]
-      - [0.0, 45.0,  75.0]
-      - [0.0, 15.0,  75.0]
-      - [0.0, 15.0, 105.0]
+    face: left
 
-  # Top-face markers (optional, Y=height face)
+  # ── Top face (four markers, one per quadrant) ───────────────────────────
+  # Top face local axes:  right = +X,  up = -Z (toward front of box).
+  # Quadrant centres for a 120×120 top face, marker side 30 mm,
+  # 10 mm margin from edges, 5 mm gap between markers:
+  #   left-front:  X=22.5, Z=22.5  →  box Y=60 (top face)
+  #   right-front: X=97.5, Z=22.5
+  #   left-back:   X=22.5, Z=97.5
+  #   right-back:  X=97.5, Z=97.5
   - id: 4
     face: top
-    corners_box_frame:
-      - [15.0,  60.0,  15.0]
-      - [45.0,  60.0,  15.0]
-      - [45.0,  60.0,  45.0]
-      - [15.0,  60.0,  45.0]
+    center_box_mm: [30.0, 60.0, 30.0]   # left-front quadrant
 
   - id: 5
     face: top
-    corners_box_frame:
-      - [75.0,  60.0,  15.0]
-      - [105.0, 60.0,  15.0]
-      - [105.0, 60.0,  45.0]
-      - [75.0,  60.0,  45.0]
+    center_box_mm: [90.0, 60.0, 30.0]   # right-front quadrant
 
   - id: 6
     face: top
-    corners_box_frame:
-      - [15.0,  60.0,  75.0]
-      - [45.0,  60.0,  75.0]
-      - [45.0,  60.0, 105.0]
-      - [15.0,  60.0, 105.0]
+    center_box_mm: [30.0, 60.0, 90.0]   # left-back quadrant
 
   - id: 7
     face: top
-    corners_box_frame:
-      - [75.0,  60.0,  75.0]
-      - [105.0, 60.0,  75.0]
-      - [105.0, 60.0, 105.0]
-      - [75.0,  60.0, 105.0]
+    center_box_mm: [90.0, 60.0, 90.0]   # right-back quadrant
 
-# Manufacturing/printing uncertainty of marker corner positions (mm, 1-sigma).
+# Manufacturing / printing uncertainty of marker corner positions (mm, 1-sigma).
 marker_position_uncertainty_mm: 0.5
 
 # Transform from box frame to simulator frame.
-# p_sim_m = R @ (p_box_mm / 1000.0) + t
-# R is a 3x3 rotation matrix; t is a 3-element translation vector (meters).
-# Default: identity rotation, box origin at sim origin.
-# EDIT THIS to match the physical placement of the box over the transducer array.
+# p_sim_m = R @ p_box_m + t
+# EDIT THIS to match the physical placement of the box above the transducer array.
+# Default: identity (box origin = sim origin, same orientation).
 box_to_sim:
   translation_m: [0.0, 0.0, 0.0]
   rotation_matrix:
