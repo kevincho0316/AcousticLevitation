@@ -1,0 +1,44 @@
+# Camera configuration for acoustic levitation measurement system.
+# Add one entry per physical camera.
+
+cameras:
+  - id: cam_front
+    serial: "ABC123"
+    intrinsics_file: calibration/cam_front_intrinsics.yaml
+    capture_resolution: [1920, 1080]
+    # UVC exposure value (negative = log2 seconds; -6 ≈ 1/64 s)
+    exposure: -6
+    # 0 = manual focus (preferred); set to actual focus value if known
+    focus: 0
+
+  - id: cam_right
+    serial: "DEF456"
+    intrinsics_file: calibration/cam_right_intrinsics.yaml
+    capture_resolution: [1920, 1080]
+    exposure: -6
+    focus: 0
+
+  - id: cam_back
+    serial: "GHI789"
+    intrinsics_file: calibration/cam_back_intrinsics.yaml
+    capture_resolution: [1920, 1080]
+    exposure: -6
+    focus: 0
+
+  - id: cam_left
+    serial: "JKL012"
+    intrinsics_file: calibration/cam_left_intrinsics.yaml
+    capture_resolution: [1920, 1080]
+    exposure: -6
+    focus: 0
+
+# Number of frames to capture per camera per session.
+frames_per_camera: 200
+
+# Directory index: map serial number → OpenCV device index.
+# Run capture.py --list-cameras to discover indices.
+serial_to_index:
+  ABC123: 0
+  DEF456: 1
+  GHI789: 2
+  JKL012: 3
