@@ -65,6 +65,8 @@ def _parse_args() -> argparse.Namespace:
                    help="Min blob area (px²) for ball detection")
     p.add_argument("--max-ball-area", type=int, default=50_000,
                    help="Max blob area (px²) for ball detection")
+    p.add_argument("--interactive", action="store_true",
+                   help="Show numbered blob selection UI for ball detection")
     return p.parse_args()
 
 
@@ -108,6 +110,7 @@ def main() -> None:
         output_path=session / "ball_detections.json",
         min_area=args.min_ball_area,
         max_area=args.max_ball_area,
+        interactive=args.interactive,
     )
 
     # ── Stage 3: Triangulation ─────────────────────────────────────────────

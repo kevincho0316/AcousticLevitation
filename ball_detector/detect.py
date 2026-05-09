@@ -65,6 +65,127 @@ def _circle_residual(x: np.ndarray, y: np.ndarray, cx: float, cy: float, r: floa
     return float(np.mean(np.abs(distances - r)))
 
 
+# ── Interactive blob selection UI ─────────────────────────────────────────────
+
+_BLOB_COLORS = [
+    (0, 255, 255), (255, 128, 0), (0, 128, 255), (255, 0, 255),
+    (0, 255, 128), (128, 255, 0), (255, 255, 0), (0, 200, 255), (255, 80, 80),
+]
+
+
+def select_blob_ui(
+    frame: np.ndarray,
+    min_area: int = 50,
+    max_area: int = 50_000,
+    title: str = "Select ball blob",
+) -> tuple[int, int] | None:
+    """Detect all blobs, label them 1…N, let user pick one.
+
+    Controls:
+        Left-click    — select nearest blob
+        1–9           — select blob by number (sorted largest→smallest)
+        Enter/Space   — confirm
+        ESC           — cancel (returns None)
+        +/-           — zoom in/out
+
+    Returns integer (x, y) centroid of selected blob in original frame, or None.
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame.copy()
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+
+    blobs: list[dict] = []
+    for lbl in range(1, n_labels):
+        area = int(stats[lbl, cv2.CC_STAT_AREA])
+        if min_area <= area <= max_area:
+            blobs.append({
+                "label": lbl,
+                "area": area,
+                "cx": int(centroids[lbl, 0]),
+                "cy": int(centroids[lbl, 1]),
+            })
+    blobs.sort(key=lambda b: b["area"], reverse=True)   # #1 = largest
+
+    state: dict = {"selected": None, "zoom": 1.0}
+
+    def _make_overlay() -> np.ndarray:
+        vis = frame.copy() if frame.ndim == 3 else cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+        for i, blob in enumerate(blobs):
+            color = _BLOB_COLORS[i % len(_BLOB_COLORS)]
+            is_sel = (state["selected"] == i)
+            outline_color = (0, 255, 0) if is_sel else color
+            thickness = 3 if is_sel else 2
+
+            mask = (labels == blob["label"]).astype(np.uint8) * 255
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(vis, cnts, -1, outline_color, thickness)
+            cv2.circle(vis, (blob["cx"], blob["cy"]), 18, outline_color, thickness)
+            cv2.putText(vis, str(i + 1),
+                        (blob["cx"] + 10, blob["cy"] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.75, outline_color, 2, cv2.LINE_AA)
+            cv2.putText(vis, f"{blob['area']}px",
+                        (blob["cx"] + 10, blob["cy"] + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, outline_color, 1, cv2.LINE_AA)
+
+        if not blobs:
+            cv2.putText(vis, "No blobs found — check threshold/area limits",
+                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+        if state["selected"] is not None:
+            hint = f"Blob {state['selected'] + 1} selected  |  Enter=confirm  ESC=cancel  +/- zoom"
+        else:
+            hint = f"{len(blobs)} blobs found  |  Click or press 1-9 to select  |  ESC=cancel"
+        cv2.putText(vis, hint, (10, vis.shape[0] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+        return vis
+
+    def _redraw() -> None:
+        base = _make_overlay()
+        h, w = base.shape[:2]
+        disp = cv2.resize(base, (int(w * state["zoom"]), int(h * state["zoom"])),
+                          interpolation=cv2.INTER_LINEAR)
+        cv2.imshow(title, disp)
+
+    def _mouse(event: int, x: int, y: int, flags: int, param) -> None:
+        if event == cv2.EVENT_LBUTTONDOWN and blobs:
+            ox = int(x / state["zoom"])
+            oy = int(y / state["zoom"])
+            dists = [(ox - b["cx"]) ** 2 + (oy - b["cy"]) ** 2 for b in blobs]
+            state["selected"] = int(np.argmin(dists))
+            _redraw()
+
+    cv2.namedWindow(title, cv2.WINDOW_NORMAL)
+    cv2.setMouseCallback(title, _mouse)
+    _redraw()
+
+    while True:
+        key = cv2.waitKey(20) & 0xFF
+        if key in (13, 32):                        # Enter / Space — confirm
+            if state["selected"] is not None:
+                break
+        elif key == 27:                            # ESC — cancel
+            state["selected"] = None
+            break
+        elif ord("1") <= key <= ord("9"):          # number key
+            idx = key - ord("1")
+            if idx < len(blobs):
+                state["selected"] = idx
+                _redraw()
+        elif key in (ord("+"), ord("=")):
+            state["zoom"] = min(state["zoom"] * 1.25, 8.0)
+            _redraw()
+        elif key == ord("-"):
+            state["zoom"] = max(state["zoom"] / 1.25, 0.25)
+            _redraw()
+
+    cv2.destroyWindow(title)
+    if state["selected"] is None:
+        return None
+    b = blobs[state["selected"]]
+    return b["cx"], b["cy"]
+
+
 # ── Single-frame detection ────────────────────────────────────────────────────
 
 def detect_ball_frame(
@@ -74,21 +195,61 @@ def detect_ball_frame(
     max_area: int = 50_000,
     max_fit_residual: float = 3.0,
     edge_margin: int = 10,
+    roi_center: tuple[int, int] | None = None,
+    roi_radius: int = 60,
 ) -> tuple[float, float] | None:
     """Detect ball center in a single already-undistorted frame.
+
+    When roi_center is provided the automatic blob search is skipped; detection
+    runs only inside a (2*roi_radius) x (2*roi_radius) window around that point.
 
     Returns (u, v) sub-pixel center or None if detection fails.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame.copy()
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    h, w = gray.shape
 
+    if roi_center is not None:
+        # ── ROI-guided path (user selected) ──────────────────────────────────
+        cx_seed, cy_seed = roi_center
+        rx0 = max(cx_seed - roi_radius, 0)
+        ry0 = max(cy_seed - roi_radius, 0)
+        rx1 = min(cx_seed + roi_radius, w)
+        ry1 = min(cy_seed + roi_radius, h)
+
+        roi_gray = cv2.GaussianBlur(gray[ry0:ry1, rx0:rx1], (5, 5), 0)
+        edges = cv2.Canny(roi_gray, 30, 80)
+        ey, ex = np.where(edges > 0)
+
+        if len(ex) >= 6:
+            ex_g = ex.astype(np.float64) + rx0
+            ey_g = ey.astype(np.float64) + ry0
+            fit = _fit_circle(ex_g, ey_g)
+            if fit is not None:
+                cx, cy, r = fit
+                if r >= 1.0 and _circle_residual(ex_g, ey_g, cx, cy, r) <= max_fit_residual:
+                    return float(cx), float(cy)
+
+        # Fall back to intensity-weighted centroid inside ROI.
+        _, thresh_roi = cv2.threshold(roi_gray, 0, 255,
+                                      cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        ys, xs = np.where(thresh_roi > 0)
+        if len(xs) == 0:
+            return None
+        weights = roi_gray[ys, xs].astype(np.float64)
+        total = weights.sum()
+        if total == 0:
+            return None
+        return float((xs * weights).sum() / total) + rx0, \
+               float((ys * weights).sum() / total) + ry0
+
+    # ── Automatic blob-search path ────────────────────────────────────────────
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
     _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
-    if n_labels <= 1:  # only background
+    if n_labels <= 1:
         return None
 
-    # Find the largest blob (excluding background label 0) within area range.
     best_label = -1
     best_area = 0
     for label in range(1, n_labels):
@@ -100,18 +261,15 @@ def detect_ball_frame(
     if best_label < 0:
         return None
 
-    h, w = gray.shape
     x0 = int(stats[best_label, cv2.CC_STAT_LEFT])
     y0 = int(stats[best_label, cv2.CC_STAT_TOP])
     bw = int(stats[best_label, cv2.CC_STAT_WIDTH])
     bh = int(stats[best_label, cv2.CC_STAT_HEIGHT])
 
-    # Reject if blob touches edge.
     if (x0 <= edge_margin or y0 <= edge_margin or
             x0 + bw >= w - edge_margin or y0 + bh >= h - edge_margin):
         return None
 
-    # Extract blob ROI and run Canny for sub-pixel circle fit.
     pad = 5
     rx0 = max(x0 - pad, 0)
     ry0 = max(y0 - pad, 0)
@@ -121,7 +279,6 @@ def detect_ball_frame(
     edges = cv2.Canny(roi_gray, 30, 80)
     ey, ex = np.where(edges > 0)
     if len(ex) < 6:
-        # Fall back to intensity-weighted centroid.
         blob_mask = (labels == best_label).astype(np.uint8)
         ys, xs = np.where(blob_mask > 0)
         weights = gray[ys, xs].astype(np.float64)
@@ -159,9 +316,38 @@ def detect_ball_camera(
     max_area: int = 50_000,
     max_fit_residual: float = 3.0,
     edge_margin: int = 10,
+    interactive: bool = False,
+    roi_radius: int = 60,
 ) -> BallDetection2D:
+    """Detect and temporally average the ball center across all frames.
+
+    When interactive=True the first valid frame is shown and the user clicks the
+    ball; every subsequent frame is then searched only within roi_radius pixels
+    of that seed point instead of running the automatic blob search.
+    """
     K = intrinsics.K.astype(np.float32)
     dist = intrinsics.dist.astype(np.float32)
+
+    roi_center: tuple[int, int] | None = None
+
+    if interactive:
+        for path in frame_paths:
+            img = cv2.imread(str(path))
+            if img is None:
+                continue
+            img_ud = cv2.undistort(img, K, dist)
+            roi_center = select_blob_ui(
+                img_ud,
+                min_area=min_area,
+                max_area=max_area,
+                title=f"Select ball blob — {intrinsics.camera_id}",
+            )
+            if roi_center is None:
+                raise RuntimeError(
+                    f"Camera {intrinsics.camera_id}: selection cancelled by user."
+                )
+            print(f"  {intrinsics.camera_id}: user selected blob at ({roi_center[0]}, {roi_center[1]})")
+            break
 
     centers: list[tuple[float, float]] = []
     n_rejected = 0
@@ -176,6 +362,7 @@ def detect_ball_camera(
             img_ud, intrinsics,
             min_area=min_area, max_area=max_area,
             max_fit_residual=max_fit_residual, edge_margin=edge_margin,
+            roi_center=roi_center, roi_radius=roi_radius,
         )
         if result is None:
             n_rejected += 1
@@ -224,6 +411,8 @@ def detect_session(
     min_area: int = 50,
     max_area: int = 50_000,
     max_fit_residual: float = 3.0,
+    interactive: bool = False,
+    roi_radius: int = 60,
 ) -> dict[str, BallDetection2D]:
     cam_cfg = load_cameras_config(cameras_config_path)
     detections: dict[str, BallDetection2D] = {}
@@ -252,6 +441,7 @@ def detect_session(
                 frame_paths, intrinsics,
                 min_area=min_area, max_area=max_area,
                 max_fit_residual=max_fit_residual,
+                interactive=interactive, roi_radius=roi_radius,
             )
             detections[cam_id] = det
             results_json["detections"][cam_id] = {
@@ -279,6 +469,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--min-area", type=int, default=50)
     p.add_argument("--max-area", type=int, default=50_000)
     p.add_argument("--max-fit-residual", type=float, default=3.0)
+    p.add_argument("--interactive", action="store_true",
+                   help="Show each camera's first frame and let the user click the ball.")
+    p.add_argument("--roi-radius", type=int, default=60,
+                   help="Search window half-size (px) around the user-selected seed point.")
     return p.parse_args()
 
 
@@ -293,6 +487,8 @@ def main() -> None:
         min_area=args.min_area,
         max_area=args.max_area,
         max_fit_residual=args.max_fit_residual,
+        interactive=args.interactive,
+        roi_radius=args.roi_radius,
     )
 
 

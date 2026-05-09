@@ -28,7 +28,10 @@ AcousticLevitation/
 │   └── propagate.py              # Uncertainty quantification (6 sources + Monte Carlo)
 ├── comparison/
 │   └── compare.py                # Measured vs. simulated trap position
+├── tests/
+│   └── test_synthetic.py         # Synthetic ground-truth tests (no hardware needed)
 ├── run_pipeline.py               # Full pipeline runner (single command)
+├── gui.py                        # Tkinter GUI — run all steps by clicking
 ├── sim.py                        # Acoustic trap simulator (pre-existing)
 └── requirements.txt
 ```
@@ -44,11 +47,12 @@ AcousticLevitation/
 | `intrinsic_calibration/` | `calibrate.py` | ChArUco detection (new + legacy API), per-image outlier rejection, saves YAML |
 | `capture/` | `capture.py` | UVC autofocus/auto-exposure disable, N-frame capture per camera, metadata JSON |
 | `extrinsic_solver/` | `solve.py` | ArUco board pose via `estimatePoseBoard`, SE(3) Lie algebra averaging over frames |
-| `ball_detector/` | `detect.py` | Otsu threshold → largest blob → Canny edge circle fit (LSQ) → temporal averaging |
+| `ball_detector/` | `detect.py` | Otsu threshold → numbered blob selection UI or auto-largest → Canny edge circle fit (LSQ) → temporal averaging |
 | `triangulation/` | `triangulate.py` | DLT init → LM refinement weighted by Mahalanobis, 3D covariance `(JᵀWJ)⁻¹` |
 | `error_propagation/` | `propagate.py` | 6 error sources via Monte Carlo + analytical propagation; MC validation |
 | `comparison/` | `compare.py` | Loads `newton_x/y/z` from `sim.py` output, sim→box frame transform, Mahalanobis, 3D+2D plots |
 | `run_pipeline.py` | — | Runs all 5 stages in sequence with one CLI command |
+| `gui.py` | — | Tkinter GUI — browse paths, configure params, run any stage with one click |
 
 ---
 
@@ -237,6 +241,71 @@ The software computes all 4 corner positions per marker automatically. You do **
 
 ---
 
+## GUI
+
+The easiest way to run the pipeline. No command-line needed.
+
+```bash
+python gui.py
+```
+
+### Layout
+
+```
+┌─ Common Paths ────────────────────────────────────────────┐
+│  Session dir   [___________________________]  […]        │
+│  Box config    [___________________________]  […]        │
+│  Cameras config[___________________________]  […]        │
+│  Calibration dir[__________________________]  […]        │
+│  Sim output    [___________________________]  […]        │
+└───────────────────────────────────────────────────────────┘
+┌─ Tabs ────────────────────────────────────────────────────┐
+│ 1·Calibrate │ 2·Capture │ 3·Extrinsic │ 4·Ball Detect    │
+│ 5·Triangulate │ 6·Error Prop │ 7·Compare │ ★ Full Pipeline│
+│                                                           │
+│  [ step-specific params + ▶ Run button ]                  │
+└───────────────────────────────────────────────────────────┘
+┌─ Output Log ──────────────────────────────────────────────┐
+│  live colored subprocess output            [ Clear log ]  │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Tabs
+
+| Tab | What it runs |
+|---|---|
+| **1 · Calibrate** | `intrinsic_calibration.calibrate` — per-camera ChArUco calibration |
+| **2 · Capture** | `capture.capture` — list cameras or capture N frames per camera |
+| **3 · Extrinsic** | `extrinsic_solver.solve` — camera pose from ArUco board |
+| **4 · Ball Detect** | `ball_detector.detect` — blob selection + sub-pixel circle fit |
+| **5 · Triangulate** | `triangulation.triangulate` — DLT + LM 3D reconstruction |
+| **6 · Error Prop** | `error_propagation.propagate` — Monte Carlo uncertainty budget |
+| **7 · Compare** | `comparison.compare` — measured vs. simulated trap position |
+| **★ Full Pipeline** | `run_pipeline.py` — all stages in one click |
+
+### Interactive blob selection (tab 4 and ★)
+
+Check **"Interactive blob selection"** to manually pick the ball blob instead of auto-selecting the largest one. An OpenCV window opens per camera:
+
+- All detected blobs are outlined and numbered (1 = largest area)
+- **Click** a blob or press **1–9** to select by number
+- **Enter / Space** — confirm
+- **ESC** — cancel
+- **+/-** — zoom in / out
+
+Every subsequent frame for that camera is then searched only within the ROI radius around the chosen centroid.
+
+### Log colors
+
+| Color | Meaning |
+|---|---|
+| Blue | Stage header |
+| Green | Saved / accepted / pass / complete |
+| Yellow | Warning |
+| Red | Error / fail / traceback |
+
+---
+
 ## Workflow
 
 ### Step 0 — Configure
@@ -387,8 +456,30 @@ python -m ball_detector.detect \
     --calibration-dir calibration \
     --min-area 50 \
     --max-area 50000 \
-    --max-fit-residual 3.0
+    --max-fit-residual 3.0 \
+    [--interactive] \
+    [--roi-radius 60]
 ```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--min-area` | `50` | Min blob area (px²) |
+| `--max-area` | `50000` | Max blob area (px²) |
+| `--max-fit-residual` | `3.0` | Max circle-fit residual (px) before rejection |
+| `--interactive` | off | Show blob selection UI for each camera instead of auto-picking largest blob |
+| `--roi-radius` | `60` | Search window half-size (px) around user-selected seed point |
+
+**Interactive blob selection UI** (`--interactive`):
+
+For each camera the first undistorted frame opens in a window showing all detected blobs outlined and numbered (1 = largest area):
+
+- **Click** a blob — selects the nearest blob
+- **1–9** — select by number directly
+- **Enter / Space** — confirm selection
+- **ESC** — cancel (aborts this camera)
+- **+/-** — zoom in/out
+
+After selection every subsequent frame is searched only within `--roi-radius` pixels of the chosen blob centroid. Use this when multiple bright objects are present and auto-detection picks the wrong one.
 
 **Triangulation:**
 ```bash
@@ -509,6 +600,33 @@ Before trusting measurements against the simulator:
 - [ ] Multi-view box-pose consistency: all cameras agree on box pose (compare each to the mean).
 - [ ] Ground truth test: place ball at a known location (micrometer stage or printed jig) and verify recovery within stated uncertainty.
 - [ ] Subset test: re-triangulate using N−1 cameras. Result falls within the full N-camera error ellipsoid.
+
+---
+
+## Testing
+
+### Synthetic pipeline test (no hardware required)
+
+`tests/test_synthetic.py` validates the triangulation math against analytically generated ground truth. No cameras, images, or config files needed — only numpy and scipy.
+
+```bash
+python tests/test_synthetic.py        # standalone
+python tests/test_synthetic.py -v     # verbose (show failure details)
+pytest tests/test_synthetic.py -v     # pytest
+```
+
+| Test | What it checks |
+|---|---|
+| `test_noiseless` | DLT+LM recovers exact ball position (< 1 nm error) |
+| `test_low_noise_4cam` | 4-camera 90° ring, 0.1 px noise → error < 0.5 mm |
+| `test_medium_noise_4cam` | 0.5 px noise → error < 2 mm; Mahalanobis distance within covariance bounds |
+| `test_three_camera_minimum` | 3-camera minimum configuration converges |
+| `test_monte_carlo_cov` | Analytical Σ_3D matches empirical spread across 300 noisy trials |
+| `test_bad_geometry` | Near-planar cameras → depth eigenvalue >> lateral (correct anisotropy) |
+| `test_ball_offset` | Off-center ball position recovered to < 1 mm at 0.3 px noise |
+| `test_session_json` | Full JSON round-trip: synthetic data → `extrinsics.json` + `ball_detections.json` → `triangulate_session()` |
+
+Run these before collecting real data to confirm the triangulation core is healthy.
 
 ---
 

@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python *)",
       "Bash(New-Item -ItemType Directory -Force -Path \"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\config\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\common\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\intrinsic_calibration\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\capture\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\extrinsic_solver\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\ball_detector\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\triangulation\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\error_propagation\",\"C:\\\\Users\\\\kevin\\\\project\\\\AcousticLevitation\\\\comparison\")",
-      "Bash(Out-Null)"
+      "Bash(Out-Null)",
+      "Bash(findstr /V \"cam_0 cam_1 cam_2 cam_3 Triangulation\")",
+      "Bash(Select-String -Pattern \"PASS|FAIL|ERROR|passed|==\")"
     ]
   }
 }
