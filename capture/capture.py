@@ -22,6 +22,7 @@ import argparse
 import datetime
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -49,18 +50,26 @@ class _Camera:
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
 
+        # Give sensor time to power on before reading (first open is cold).
+        time.sleep(1.5)
+
+        # Warm-up with auto-exposure so the sensor adapts before we lock settings.
+        for _ in range(30):
+            self._cap.read()
+
         # Disable autofocus.
         self._cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         if self._cfg.get("focus") is not None:
             self._cap.set(cv2.CAP_PROP_FOCUS, self._cfg["focus"])
 
-        # Disable auto-exposure; set manual exposure.
-        self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1 = manual on most UVC cameras
-        self._cap.set(cv2.CAP_PROP_EXPOSURE, self._cfg["exposure"])
-
-        # Warm-up: let the camera settle its analog gain / sensor.
-        for _ in range(10):
-            self._cap.read()
+        # Lock manual exposure only if explicitly configured.
+        # CAP_PROP_AUTO_EXPOSURE: 1 = manual on most UVC/DSHOW; 3 = auto.
+        if self._cfg.get("exposure") is not None:
+            self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            self._cap.set(cv2.CAP_PROP_EXPOSURE, self._cfg["exposure"])
+            # Let sensor settle after exposure change.
+            for _ in range(20):
+                self._cap.read()
 
         return self
 
@@ -94,18 +103,21 @@ def capture_session(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     session_meta: dict = {
-        "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "n_frames_requested": n_frames,
         "cameras": [],
     }
 
-    for cam_cfg in cameras:
+    cam_metas: list[dict | None] = [None] * len(cameras)
+    lock = threading.Lock()
+
+    def _capture_one(cam_cfg: dict, slot: int) -> None:
         cam_id = cam_cfg["id"]
         serial = cam_cfg.get("serial", "")
         device_index = serial_to_index.get(serial, None)
         if device_index is None:
             print(f"WARN: no device index for camera {cam_id} (serial {serial}). Skipping.")
-            continue
+            return
 
         cam_dir = output_dir / cam_id
         cam_dir.mkdir(parents=True, exist_ok=True)
@@ -125,13 +137,13 @@ def capture_session(
                         print(f"  {cam_id}: {i+1}/{n_frames} frames")
         except RuntimeError as exc:
             print(f"ERROR: {exc}")
-            continue
+            return
 
         elapsed = time.monotonic() - t_start
-        print(f"  Done: {len(frame_paths)} frames in {elapsed:.1f} s ({len(frame_paths)/elapsed:.1f} fps)")
+        print(f"  Done [{cam_id}]: {len(frame_paths)} frames in {elapsed:.1f} s ({len(frame_paths)/elapsed:.1f} fps)")
 
         actual_res = _read_resolution(cam_dir / frame_paths[0]) if frame_paths else None
-        cam_meta = {
+        meta = {
             "id": cam_id,
             "serial": serial,
             "device_index": device_index,
@@ -142,7 +154,19 @@ def capture_session(
             "focus": cam_cfg.get("focus"),
             "elapsed_s": round(elapsed, 2),
         }
-        session_meta["cameras"].append(cam_meta)
+        with lock:
+            cam_metas[slot] = meta
+
+    threads = [
+        threading.Thread(target=_capture_one, args=(cam_cfg, i), daemon=True)
+        for i, cam_cfg in enumerate(cameras)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    session_meta["cameras"] = [m for m in cam_metas if m is not None]
 
     meta_path = output_dir / "metadata.json"
     with open(meta_path, "w") as f:

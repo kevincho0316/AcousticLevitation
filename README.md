@@ -189,6 +189,11 @@ The solver requires ≥ 3 markers from ≥ 2 different faces per frame. More mar
 
 Just fill in box size, marker size, and which ID is on which face:
 
+ Why it's high: all images shot overhead at steep angles from same distance. Calibration can't cleanly separate
+  distortion from focal length without:
+  1. Images at different distances (close + far)
+  2. Board at different positions in the frame — corners, edges (not always centered)
+  3. Angles ≤ 45°, not near edge-on
 ```yaml
 box_dimensions:
   width_mm:  120.0    # measure with calipers

@@ -7,6 +7,7 @@ Launch:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import threading
@@ -78,12 +79,12 @@ class App(tk.Tk):
         self.cal_id      = self._field(f, 0, "Camera ID",         "cam_front")
         self.cal_imgs    = self._browse(f, 1, "Images dir",        kind="dir")
         self.cal_out     = self._field(f, 2, "Output YAML",        "calibration/cam_front_intrinsics.yaml")
-        self.cal_sq_x    = self._field(f, 3, "Squares X",          "9")
-        self.cal_sq_y    = self._field(f, 4, "Squares Y",          "6")
-        self.cal_sq_len  = self._field(f, 5, "Square length (m)",  "0.04")
-        self.cal_mk_len  = self._field(f, 6, "Marker length (m)",  "0.02")
-        self.cal_dict    = self._field(f, 7, "ArUco dict",         "DICT_5X5_100")
-        self.cal_reproj  = self._field(f, 8, "Max reproj (px)",    "1.0")
+        self.cal_sq_x    = self._field(f, 3, "Squares X",          "8")
+        self.cal_sq_y    = self._field(f, 4, "Squares Y",          "11")
+        self.cal_sq_len  = self._field(f, 5, "Square length (m)",  "0.015")
+        self.cal_mk_len  = self._field(f, 6, "Marker length (m)",  "0.011")
+        self.cal_dict    = self._field(f, 7, "ArUco dict",         "DICT_4X4_50")
+        self.cal_reproj  = self._field(f, 8, "Max reproj (px)",    "3.0")
 
         ttk.Button(f, text="▶  Run Calibration",
                    command=self._run_calibrate).grid(row=9, column=0, columnspan=3,
@@ -278,12 +279,15 @@ class App(tk.Tk):
 
         def _worker():
             try:
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
                     cwd=str(ROOT),
+                    env=env,
                     bufsize=1,
                 )
                 for line in proc.stdout:
