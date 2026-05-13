@@ -25,6 +25,7 @@ class App(tk.Tk):
         self.title("Acoustic Levitation — Measurement Pipeline")
         self.geometry("860x720")
         self.minsize(700, 560)
+        self._active_jobs = 0
         self._build_paths()
         self._build_notebook()
         self._build_log()
@@ -84,7 +85,7 @@ class App(tk.Tk):
         self.cal_sq_len  = self._field(f, 5, "Square length (m)",  "0.015")
         self.cal_mk_len  = self._field(f, 6, "Marker length (m)",  "0.011")
         self.cal_dict    = self._field(f, 7, "ArUco dict",         "DICT_4X4_50")
-        self.cal_reproj  = self._field(f, 8, "Max reproj (px)",    "3.0")
+        self.cal_reproj  = self._field(f, 8, "Max reproj (px)",    "1.0")
 
         ttk.Button(f, text="▶  Run Calibration",
                    command=self._run_calibrate).grid(row=9, column=0, columnspan=3,
@@ -141,8 +142,10 @@ class App(tk.Tk):
                   foreground="gray", justify="left").grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
+        self.det_bg_mode = self._bg_section(f, 6)
+
         ttk.Button(f, text="▶  Run Ball Detector",
-                   command=self._run_detect).grid(row=6, column=0, columnspan=3,
+                   command=self._run_detect).grid(row=7, column=0, columnspan=3,
                                                   pady=14, ipadx=10, ipady=4)
 
     # ── Tab 5: Triangulation ──────────────────────────────────────────────────
@@ -206,9 +209,11 @@ class App(tk.Tk):
                         variable=self.fp_interactive).grid(
             row=8, column=0, columnspan=3, sticky="w")
 
+        self.fp_bg_mode = self._bg_section(f, 9)
+
         ttk.Button(f, text="▶▶  Run Full Pipeline",
                    command=self._run_full_pipeline).grid(
-            row=9, column=0, columnspan=3, pady=18, ipadx=24, ipady=8)
+            row=10, column=0, columnspan=3, pady=18, ipadx=24, ipady=8)
 
     # ── Widget helpers ────────────────────────────────────────────────────────
 
@@ -234,6 +239,36 @@ class App(tk.Tk):
                                                                   padx=(4, 0))
         return var
 
+    def _bg_section(self, parent, row: int) -> tk.StringVar:
+        """Background subtraction radio group (per-camera — no single path)."""
+        lf = ttk.LabelFrame(parent, text="Background Subtraction", padding=6)
+        lf.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+
+        mode_var = tk.StringVar(value="none")
+
+        hint_label = ttk.Label(lf, foreground="gray", justify="left")
+
+        def _toggle(*_):
+            if mode_var.get() == "file":
+                hint_label.config(
+                    text="Place background.png in each camera's frame folder:\n"
+                         "  <session>/<cam_id>/background.png\n"
+                         "Each camera needs its own reference shot (levitator on, no ball)."
+                )
+                hint_label.pack(anchor="w", pady=(4, 0))
+            else:
+                hint_label.pack_forget()
+
+        for val, text in [
+            ("none",   "None  (threshold raw frame)"),
+            ("file",   "Per-camera background images  (one reference shot per camera)"),
+            ("median", "Median of frames  (computed from captured frames automatically)"),
+        ]:
+            ttk.Radiobutton(lf, text=text, variable=mode_var,
+                            value=val, command=_toggle).pack(anchor="w")
+
+        return mode_var
+
     # ── Log area ──────────────────────────────────────────────────────────────
 
     def _build_log(self):
@@ -252,8 +287,16 @@ class App(tk.Tk):
         self.log.tag_config("err", foreground="#f48771")
         self.log.tag_config("warn",foreground="#dcdcaa")
 
-        ttk.Button(lf, text="Clear log",
-                   command=self._clear_log).pack(anchor="e", pady=(4, 0))
+        bottom = ttk.Frame(lf)
+        bottom.pack(fill="x", pady=(4, 0))
+
+        self._status_text = tk.StringVar(value="Idle")
+        ttk.Label(bottom, textvariable=self._status_text,
+                  anchor="w", width=36).pack(side="left", padx=(0, 8))
+        self._progress = ttk.Progressbar(bottom, mode="indeterminate", length=180)
+        self._progress.pack(side="left")
+        ttk.Button(bottom, text="Clear log",
+                   command=self._clear_log).pack(side="right")
 
     def _log(self, text: str, tag: str = "") -> None:
         self.log.configure(state="normal")
@@ -266,6 +309,23 @@ class App(tk.Tk):
         self.log.delete("1.0", "end")
         self.log.configure(state="disabled")
 
+    # ── Progress / status ─────────────────────────────────────────────────────
+
+    def _job_start(self, header: str) -> None:
+        self._active_jobs += 1
+        self._status_text.set(f"Running: {header} …")
+        if self._active_jobs == 1:
+            self._progress.start(12)
+
+    def _job_done(self) -> None:
+        self._active_jobs = max(0, self._active_jobs - 1)
+        if self._active_jobs == 0:
+            self._progress.stop()
+            self._progress["value"] = 0
+            self._status_text.set("Idle")
+        else:
+            self._status_text.set(f"{self._active_jobs} job(s) running …")
+
     # ── Command runner (non-blocking) ─────────────────────────────────────────
 
     def _check_session(self) -> bool:
@@ -276,6 +336,7 @@ class App(tk.Tk):
 
     def _run_command(self, cmd: list[str], header: str) -> None:
         self._log(f"\n{'─' * 58}\n  {header}\n{'─' * 58}\n", "hdr")
+        self._job_start(header)
 
         def _worker():
             try:
@@ -307,6 +368,8 @@ class App(tk.Tk):
                            "ok" if proc.returncode == 0 else "err")
             except Exception as exc:
                 self.after(0, self._log, f"LAUNCH ERROR: {exc}\n", "err")
+            finally:
+                self.after(0, self._job_done)
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -366,6 +429,8 @@ class App(tk.Tk):
         ]
         if self.det_interactive.get():
             cmd.append("--interactive")
+        if self.det_bg_mode.get() == "median":
+            cmd.append("--median-background")
         self._run_command(cmd, "Ball Detector")
 
     def _run_triangulate(self):
@@ -426,6 +491,8 @@ class App(tk.Tk):
             cmd.append("--skip-error-propagation")
         if self.fp_interactive.get():
             cmd.append("--interactive")
+        if self.fp_bg_mode.get() == "median":
+            cmd.append("--median-background")
         self._run_command(cmd, "Full Pipeline")
 
 

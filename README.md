@@ -47,7 +47,7 @@ AcousticLevitation/
 | `intrinsic_calibration/` | `calibrate.py` | ChArUco detection (new + legacy API), per-image outlier rejection, saves YAML |
 | `capture/` | `capture.py` | UVC autofocus/auto-exposure disable, N-frame capture per camera, metadata JSON |
 | `extrinsic_solver/` | `solve.py` | ArUco board pose via `estimatePoseBoard`, SE(3) Lie algebra averaging over frames |
-| `ball_detector/` | `detect.py` | Otsu threshold → numbered blob selection UI or auto-largest → Canny edge circle fit (LSQ) → temporal averaging |
+| `ball_detector/` | `detect.py` | Optional background subtraction (absdiff) → Otsu threshold → numbered blob selection UI or auto-largest → Canny edge circle fit (LSQ) → temporal averaging |
 | `triangulation/` | `triangulate.py` | DLT init → LM refinement weighted by Mahalanobis, 3D covariance `(JᵀWJ)⁻¹` |
 | `error_propagation/` | `propagate.py` | 6 error sources via Monte Carlo + analytical propagation; MC validation |
 | `comparison/` | `compare.py` | Loads `newton_x/y/z` from `sim.py` output, sim→box frame transform, Mahalanobis, 3D+2D plots |
@@ -282,7 +282,7 @@ python gui.py
 | **1 · Calibrate** | `intrinsic_calibration.calibrate` — per-camera ChArUco calibration |
 | **2 · Capture** | `capture.capture` — list cameras or capture N frames per camera |
 | **3 · Extrinsic** | `extrinsic_solver.solve` — camera pose from ArUco board |
-| **4 · Ball Detect** | `ball_detector.detect` — blob selection + sub-pixel circle fit |
+| **4 · Ball Detect** | `ball_detector.detect` — blob selection + sub-pixel circle fit; background subtraction options |
 | **5 · Triangulate** | `triangulation.triangulate` — DLT + LM 3D reconstruction |
 | **6 · Error Prop** | `error_propagation.propagate` — Monte Carlo uncertainty budget |
 | **7 · Compare** | `comparison.compare` — measured vs. simulated trap position |
@@ -299,6 +299,24 @@ Check **"Interactive blob selection"** to manually pick the ball blob instead of
 - **+/-** — zoom in / out
 
 Every subsequent frame for that camera is then searched only within the ROI radius around the chosen centroid.
+
+When a background subtraction mode is active, the selector shows the **diff image** so the view matches what the detector thresholds.
+
+### Background subtraction (tab 4 and ★)
+
+The **Background Subtraction** group controls `cv2.absdiff(frame, background)` pre-processing before thresholding:
+
+| Option | CLI equivalent | When to use |
+|---|---|---|
+| None | — | Clean high-contrast setup, no confounding bright objects |
+| Per-camera background images | *(auto-detected)* | Have a reference shot per camera. Best suppression. |
+| Median of frames | `--median-background` | No separate reference shot; background computed automatically. |
+
+**Per-camera background images**: each camera has a different viewpoint so one global image makes no sense. Place one reference PNG (levitator on, no ball) per camera at:
+```
+<session>/<cam_id>/background.png
+```
+The detector picks these up automatically — no CLI flag needed. When this GUI option is selected, a reminder shows the expected path convention.
 
 ### Log colors
 
@@ -430,6 +448,8 @@ python run_pipeline.py \
 | `--max-reproj-px` | `2.0` | Max reprojection error (px) for pose frame rejection |
 | `--min-ball-area` | `50` | Min blob area (px²) for ball detection |
 | `--max-ball-area` | `50000` | Max blob area (px²) for ball detection |
+| `--background-frame PATH` | off | Reference image (no ball) subtracted before thresholding |
+| `--median-background` | off | Compute median of frames as background and subtract it |
 
 Pipeline stages run in order:
 1. **Extrinsic solver** → `session/extrinsics.json`
@@ -463,7 +483,8 @@ python -m ball_detector.detect \
     --max-area 50000 \
     --max-fit-residual 3.0 \
     [--interactive] \
-    [--roi-radius 60]
+    [--roi-radius 60] \
+    [--background-frame path/to/bg.png | --median-background]
 ```
 
 | Argument | Default | Description |
@@ -473,8 +494,16 @@ python -m ball_detector.detect \
 | `--max-fit-residual` | `3.0` | Max circle-fit residual (px) before rejection |
 | `--interactive` | off | Show blob selection UI for each camera instead of auto-picking largest blob |
 | `--roi-radius` | `60` | Search window half-size (px) around user-selected seed point |
+| `--background-frame PATH` | off | Subtract a static reference image (shot with no ball) before thresholding. Mutually exclusive with `--median-background`. Per-camera override: place `background.png` inside `<session>/<cam_id>/`. |
+| `--median-background` | off | Compute pixel-wise median of captured frames as background and subtract it. Useful when no separate reference shot is available. |
+
+**Background subtraction** suppresses static scene elements that survive Otsu thresholding (e.g. bright reflections, ArUco marker borders). The detection image becomes `cv2.absdiff(frame, background)` instead of raw gray. Two modes:
+
+- `--background-frame path/bg.png` — shoot one frame with the levitator running but no ball, save it, pass the path. Best accuracy. Can be overridden per-camera by placing `background.png` inside the camera's frame directory.
+- `--median-background` — median over the captured frames is computed automatically (subsampled to 50 frames). Works without a separate shot but is less clean if the ball intensity varies across frames.
 
 **Interactive blob selection UI** (`--interactive`):
+When `--background-frame` or `--median-background` is active, the interactive selector shows the **diff image** (not the raw frame), so what you see matches what the detector thresholds.
 
 For each camera the first undistorted frame opens in a window showing all detected blobs outlined and numbered (1 = largest area):
 

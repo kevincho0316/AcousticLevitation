@@ -65,14 +65,14 @@ def _detect_charuco(image: np.ndarray, board: cv2.aruco.CharucoBoard,
         except cv2.error:
             pass
 
-    if ch_corners is None or ch_ids is None or len(ch_ids) < 4:
+    if ch_corners is None or ch_ids is None or len(ch_ids) < 6:
         try:
             charuco_detector = cv2.aruco.CharucoDetector(board)
             ch_corners, ch_ids, _, _ = charuco_detector.detectBoard(gray)
         except AttributeError:
             pass
 
-    if ch_corners is None or ch_ids is None or len(ch_ids) < 4:
+    if ch_corners is None or ch_ids is None or len(ch_ids) < 6:
         return None, None
     return ch_corners, ch_ids
 
@@ -164,10 +164,6 @@ def calibrate_camera(
 
     # ── ChArUco path ──────────────────────────────────────────────────────────
     if len(charuco_corners) >= 5:
-        if len(charuco_corners) < 5:
-            raise RuntimeError(
-                f"Only {len(charuco_corners)} usable images (need ≥ 5)."
-            )
         try:
             ret, K, dist, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(
                 charuco_corners, charuco_ids, board, image_size, None, None
@@ -272,7 +268,7 @@ def _parse_args() -> argparse.Namespace:
                    help="Embedded marker side length in meters")
     p.add_argument("--dict", default="DICT_4X4_50",
                    help="ArUco dictionary name (e.g. DICT_4X4_50)")
-    p.add_argument("--max-reproj-px", type=float, default=3.0,
+    p.add_argument("--max-reproj-px", type=float, default=1.0,
                    help="Per-image reprojection error threshold for outlier rejection")
     return p.parse_args()
 

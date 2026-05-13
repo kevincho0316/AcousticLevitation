@@ -4,12 +4,16 @@ White ball center detection with sub-pixel precision.
 Pipeline per frame:
   1. Undistort.
   2. Convert to grayscale, apply Gaussian blur.
-  3. Otsu threshold (high-contrast setup: white ball, black background).
-  4. Find connected components; keep the largest blob whose area is within
+  3. If a background image is supplied, subtract it (absdiff) to isolate the
+     ball from background clutter before thresholding.  Background can be:
+       a. A separate image captured without the ball (--background-frame), or
+       b. The pixel-wise median of all captured frames (--median-background).
+  4. Otsu threshold (high-contrast setup: white ball, black background).
+  5. Find connected components; keep the largest blob whose area is within
      the plausible range for a ball at camera distance.
-  5. Fit a circle to Canny edge pixels of the blob region by linear least squares.
-  6. The circle center is the sub-pixel 2D ball position.
-  7. Reject frames where: blob is at the frame edge, fit residual is too large,
+  6. Fit a circle to Canny edge pixels of the blob region by linear least squares.
+  7. The circle center is the sub-pixel 2D ball position.
+  8. Reject frames where: blob is at the frame edge, fit residual is too large,
      or blob area is implausible.
 
 Per-camera output:
@@ -23,7 +27,8 @@ Usage:
         --cameras-config config/cameras.yaml \\
         --calibration-dir calibration/ \\
         --output sessions/session_001/ball_detections.json \\
-        [--min-area 50] [--max-area 50000] [--max-fit-residual 2.0]
+        [--min-area 50] [--max-area 50000] [--max-fit-residual 2.0] \\
+        [--background-frame path/to/bg.png | --median-background]
 """
 
 from __future__ import annotations
@@ -197,16 +202,24 @@ def detect_ball_frame(
     edge_margin: int = 10,
     roi_center: tuple[int, int] | None = None,
     roi_radius: int = 60,
+    background: np.ndarray | None = None,
 ) -> tuple[float, float] | None:
     """Detect ball center in a single already-undistorted frame.
 
     When roi_center is provided the automatic blob search is skipped; detection
     runs only inside a (2*roi_radius) x (2*roi_radius) window around that point.
 
+    When background is provided (grayscale, same size as frame), the detection
+    image is cv2.absdiff(gray, background) instead of gray, which suppresses
+    static scene elements and makes the ball stand out better.
+
     Returns (u, v) sub-pixel center or None if detection fails.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame.copy()
     h, w = gray.shape
+
+    # Apply background subtraction if supplied.
+    detection_img = cv2.absdiff(gray, background) if background is not None else gray
 
     if roi_center is not None:
         # ── ROI-guided path (user selected) ──────────────────────────────────
@@ -216,7 +229,7 @@ def detect_ball_frame(
         rx1 = min(cx_seed + roi_radius, w)
         ry1 = min(cy_seed + roi_radius, h)
 
-        roi_gray = cv2.GaussianBlur(gray[ry0:ry1, rx0:rx1], (5, 5), 0)
+        roi_gray = cv2.GaussianBlur(detection_img[ry0:ry1, rx0:rx1], (5, 5), 0)
         edges = cv2.Canny(roi_gray, 30, 80)
         ey, ex = np.where(edges > 0)
 
@@ -243,7 +256,7 @@ def detect_ball_frame(
                float((ys * weights).sum() / total) + ry0
 
     # ── Automatic blob-search path ────────────────────────────────────────────
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    blurred = cv2.GaussianBlur(detection_img, (5, 5), 0)
     _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     n_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
@@ -309,6 +322,28 @@ def detect_ball_frame(
 
 # ── Per-camera temporal averaging ─────────────────────────────────────────────
 
+def _compute_median_background(
+    frame_paths: list[Path],
+    K: np.ndarray,
+    dist: np.ndarray,
+    max_frames: int = 50,
+) -> np.ndarray | None:
+    """Pixel-wise median of up to max_frames undistorted grayscale frames."""
+    step = max(1, len(frame_paths) // max_frames)
+    grays = []
+    for path in frame_paths[::step]:
+        img = cv2.imread(str(path))
+        if img is None:
+            continue
+        img_ud = cv2.undistort(img, K, dist)
+        gray = cv2.cvtColor(img_ud, cv2.COLOR_BGR2GRAY) if img_ud.ndim == 3 else img_ud
+        grays.append(gray)
+    if not grays:
+        return None
+    stack = np.stack(grays, axis=0)
+    return np.median(stack, axis=0).astype(np.uint8)
+
+
 def detect_ball_camera(
     frame_paths: list[Path],
     intrinsics,
@@ -318,15 +353,38 @@ def detect_ball_camera(
     edge_margin: int = 10,
     interactive: bool = False,
     roi_radius: int = 60,
+    background_path: Path | None = None,
+    use_median_background: bool = False,
 ) -> BallDetection2D:
     """Detect and temporally average the ball center across all frames.
 
     When interactive=True the first valid frame is shown and the user clicks the
     ball; every subsequent frame is then searched only within roi_radius pixels
     of that seed point instead of running the automatic blob search.
+
+    Background subtraction modes (mutually exclusive, background_path wins):
+      background_path         — load a reference image captured without the ball
+      use_median_background   — compute pixel-wise median of all captured frames
+                                as the background (good for removing static clutter
+                                when a separate background image is unavailable)
     """
     K = intrinsics.K.astype(np.float32)
     dist = intrinsics.dist.astype(np.float32)
+
+    background: np.ndarray | None = None
+    if background_path is not None:
+        bg_img = cv2.imread(str(background_path))
+        if bg_img is None:
+            raise RuntimeError(f"Could not load background image: {background_path}")
+        bg_ud = cv2.undistort(bg_img, K, dist)
+        background = cv2.cvtColor(bg_ud, cv2.COLOR_BGR2GRAY) if bg_ud.ndim == 3 else bg_ud
+        print(f"  {intrinsics.camera_id}: using background from {background_path}")
+    elif use_median_background:
+        background = _compute_median_background(frame_paths, K, dist)
+        if background is not None:
+            print(f"  {intrinsics.camera_id}: using median background from {len(frame_paths)} frames")
+        else:
+            print(f"  {intrinsics.camera_id}: WARN median background computation failed, proceeding without")
 
     roi_center: tuple[int, int] | None = None
 
@@ -336,8 +394,16 @@ def detect_ball_camera(
             if img is None:
                 continue
             img_ud = cv2.undistort(img, K, dist)
+            # Show the diff image in the selector when background is available so
+            # the user sees the same thing the detector will threshold.
+            if background is not None:
+                gray_ud = cv2.cvtColor(img_ud, cv2.COLOR_BGR2GRAY) if img_ud.ndim == 3 else img_ud
+                diff = cv2.absdiff(gray_ud, background)
+                display = cv2.cvtColor(diff, cv2.COLOR_GRAY2BGR)
+            else:
+                display = img_ud
             roi_center = select_blob_ui(
-                img_ud,
+                display,
                 min_area=min_area,
                 max_area=max_area,
                 title=f"Select ball blob — {intrinsics.camera_id}",
@@ -363,6 +429,7 @@ def detect_ball_camera(
             min_area=min_area, max_area=max_area,
             max_fit_residual=max_fit_residual, edge_margin=edge_margin,
             roi_center=roi_center, roi_radius=roi_radius,
+            background=background,
         )
         if result is None:
             n_rejected += 1
@@ -413,6 +480,8 @@ def detect_session(
     max_fit_residual: float = 3.0,
     interactive: bool = False,
     roi_radius: int = 60,
+    background_path: Path | None = None,
+    use_median_background: bool = False,
 ) -> dict[str, BallDetection2D]:
     cam_cfg = load_cameras_config(cameras_config_path)
     detections: dict[str, BallDetection2D] = {}
@@ -435,6 +504,11 @@ def detect_session(
             print(f"WARN: no frames for {cam_id}. Skipping.")
             continue
 
+        # Per-camera background: look for <session>/<cam_id>/background.png first,
+        # then fall back to the global background_path argument.
+        cam_bg_path = frame_dir / "background.png"
+        effective_bg = cam_bg_path if cam_bg_path.exists() else background_path
+
         print(f"\nDetecting ball in {cam_id} ({len(frame_paths)} frames) …")
         try:
             det = detect_ball_camera(
@@ -442,6 +516,8 @@ def detect_session(
                 min_area=min_area, max_area=max_area,
                 max_fit_residual=max_fit_residual,
                 interactive=interactive, roi_radius=roi_radius,
+                background_path=effective_bg,
+                use_median_background=use_median_background,
             )
             detections[cam_id] = det
             results_json["detections"][cam_id] = {
@@ -473,6 +549,19 @@ def _parse_args() -> argparse.Namespace:
                    help="Show each camera's first frame and let the user click the ball.")
     p.add_argument("--roi-radius", type=int, default=60,
                    help="Search window half-size (px) around the user-selected seed point.")
+
+    bg_group = p.add_mutually_exclusive_group()
+    bg_group.add_argument(
+        "--background-frame", type=Path, default=None, metavar="PATH",
+        help="Path to a reference image captured without the ball. "
+             "Subtracted from each frame before thresholding. "
+             "Per-camera override: place background.png inside the camera frame directory.",
+    )
+    bg_group.add_argument(
+        "--median-background", action="store_true",
+        help="Compute the pixel-wise median of captured frames as background and subtract it. "
+             "Useful when no separate background image is available.",
+    )
     return p.parse_args()
 
 
@@ -489,6 +578,8 @@ def main() -> None:
         max_fit_residual=args.max_fit_residual,
         interactive=args.interactive,
         roi_radius=args.roi_radius,
+        background_path=args.background_frame,
+        use_median_background=args.median_background,
     )
 
 

@@ -67,6 +67,16 @@ def _parse_args() -> argparse.Namespace:
                    help="Max blob area (px²) for ball detection")
     p.add_argument("--interactive", action="store_true",
                    help="Show numbered blob selection UI for ball detection")
+
+    bg_group = p.add_mutually_exclusive_group()
+    bg_group.add_argument(
+        "--background-frame", type=Path, default=None, metavar="PATH",
+        help="Reference image captured without the ball; subtracted before thresholding",
+    )
+    bg_group.add_argument(
+        "--median-background", action="store_true",
+        help="Compute pixel-wise median of captured frames as background and subtract it",
+    )
     return p.parse_args()
 
 
@@ -111,6 +121,8 @@ def main() -> None:
         min_area=args.min_ball_area,
         max_area=args.max_ball_area,
         interactive=args.interactive,
+        background_path=args.background_frame,
+        use_median_background=args.median_background,
     )
 
     # ── Stage 3: Triangulation ─────────────────────────────────────────────
