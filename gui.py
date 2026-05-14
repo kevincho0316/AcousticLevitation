@@ -63,6 +63,7 @@ class App(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=8, pady=4)
         self._tab_calibrate()
+        self._tab_box_cal()
         self._tab_capture()
         self._tab_extrinsic()
         self._tab_detect()
@@ -77,19 +78,121 @@ class App(tk.Tk):
         f = ttk.Frame(self.nb, padding=12)
         self.nb.add(f, text="1 · Calibrate")
 
-        self.cal_id      = self._field(f, 0, "Camera ID",         "cam_front")
-        self.cal_imgs    = self._browse(f, 1, "Images dir",        kind="dir")
-        self.cal_out     = self._field(f, 2, "Output YAML",        "calibration/cam_front_intrinsics.yaml")
-        self.cal_sq_x    = self._field(f, 3, "Squares X",          "8")
-        self.cal_sq_y    = self._field(f, 4, "Squares Y",          "11")
-        self.cal_sq_len  = self._field(f, 5, "Square length (m)",  "0.015")
-        self.cal_mk_len  = self._field(f, 6, "Marker length (m)",  "0.011")
-        self.cal_dict    = self._field(f, 7, "ArUco dict",         "DICT_4X4_50")
-        self.cal_reproj  = self._field(f, 8, "Max reproj (px)",    "1.0")
+        # Camera selector — populated from cameras.yaml
+        ttk.Label(f, text="Camera:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        self._cal_cam_var = tk.StringVar()
+        self._cal_cam_combo = ttk.Combobox(f, textvariable=self._cal_cam_var,
+                                           state="readonly", width=26)
+        self._cal_cam_combo.grid(row=0, column=1, sticky="w", pady=3)
+        self._cal_cam_combo.bind("<<ComboboxSelected>>", self._on_cal_cam_selected)
+        ttk.Button(f, text="↺", width=3,
+                   command=self._reload_cal_cameras).grid(row=0, column=2, padx=(4, 0))
+
+        self.cal_imgs   = self._browse(f, 1, "Images dir",       kind="dir")
+        self.cal_id     = self._field(f,  2, "Camera ID",         "")
+        self.cal_out    = self._field(f,  3, "Output YAML",       "")
+        self.cal_sq_x   = self._field(f,  4, "Squares X",         "8")
+        self.cal_sq_y   = self._field(f,  5, "Squares Y",         "11")
+        self.cal_sq_len = self._field(f,  6, "Square length (m)", "0.015")
+        self.cal_mk_len = self._field(f,  7, "Marker length (m)", "0.011")
+        self.cal_dict   = self._field(f,  8, "ArUco dict",        "DICT_4X4_50")
+        self.cal_reproj = self._field(f,  9, "Max reproj (px)",   "1.0")
 
         ttk.Button(f, text="▶  Run Calibration",
-                   command=self._run_calibrate).grid(row=9, column=0, columnspan=3,
+                   command=self._run_calibrate).grid(row=10, column=0, columnspan=3,
                                                      pady=14, ipadx=10, ipady=4)
+
+    def _reload_cal_cameras(self):
+        """Read cameras.yaml and refresh the camera dropdown."""
+        path = self.v_cams.get().strip()
+        if not path:
+            messagebox.showerror("Missing path", "Set Cameras config in Common Paths first.")
+            return
+        try:
+            import yaml
+            with open(path, "r") as f:
+                cfg = yaml.safe_load(f)
+            ids = [c["id"] for c in cfg.get("cameras", [])]
+        except Exception as exc:
+            messagebox.showerror("Load error", str(exc))
+            return
+        self._cal_cam_combo["values"] = ids
+        self._cal_cam_cfg = cfg  # cache for _on_cal_cam_selected
+        if ids:
+            self._cal_cam_combo.current(0)
+            self._on_cal_cam_selected()
+
+    def _on_cal_cam_selected(self, _event=None):
+        """Auto-fill Camera ID and Output YAML from the selected camera entry."""
+        cfg = getattr(self, "_cal_cam_cfg", None)
+        if cfg is None:
+            return
+        selected = self._cal_cam_var.get()
+        for cam in cfg.get("cameras", []):
+            if cam["id"] == selected:
+                self.cal_id.set(cam["id"])
+                self.cal_out.set(cam.get("intrinsics_file", ""))
+                break
+
+    # ── Tab 1b: Box marker calibration ───────────────────────────────────────
+
+    def _tab_box_cal(self):
+        f = ttk.Frame(self.nb, padding=12)
+        self.nb.add(f, text="1b · Box Cal")
+
+        # Camera selector
+        ttk.Label(f, text="Camera:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        self._boxcal_cam_var = tk.StringVar()
+        self._boxcal_cam_combo = ttk.Combobox(f, textvariable=self._boxcal_cam_var,
+                                              state="readonly", width=26)
+        self._boxcal_cam_combo.grid(row=0, column=1, sticky="w", pady=3)
+        self._boxcal_cam_combo.bind("<<ComboboxSelected>>", self._on_boxcal_cam_selected)
+        ttk.Button(f, text="↺", width=3,
+                   command=self._reload_boxcal_cameras).grid(row=0, column=2, padx=(4, 0))
+
+        self.boxcal_imgs   = self._browse(f, 1, "Images dir",          kind="dir")
+        self.boxcal_intr   = self._field(f,  2, "Intrinsics YAML",     "")
+        self.boxcal_out    = self._field(f,  3, "Output config",        "config/box.yaml")
+        self.boxcal_min_mk = self._field(f,  4, "Min markers",          "3")
+        self.boxcal_reproj = self._field(f,  5, "Max reproj (px)",      "1.5")
+        self.boxcal_dbg    = self._browse(f, 6, "Debug dir (optional)", kind="dir")
+
+        ttk.Label(f, text="Box config taken from Common Paths above.",
+                  foreground="gray").grid(row=7, column=0, columnspan=3,
+                                          sticky="w", pady=(8, 0))
+
+        ttk.Button(f, text="▶  Run Box Calibration",
+                   command=self._run_box_cal).grid(row=8, column=0, columnspan=3,
+                                                   pady=14, ipadx=10, ipady=4)
+
+    def _reload_boxcal_cameras(self):
+        path = self.v_cams.get().strip()
+        if not path:
+            messagebox.showerror("Missing path", "Set Cameras config in Common Paths first.")
+            return
+        try:
+            import yaml
+            with open(path, "r") as f:
+                cfg = yaml.safe_load(f)
+            ids = [c["id"] for c in cfg.get("cameras", [])]
+        except Exception as exc:
+            messagebox.showerror("Load error", str(exc))
+            return
+        self._boxcal_cam_combo["values"] = ids
+        self._boxcal_cam_cfg = cfg
+        if ids:
+            self._boxcal_cam_combo.current(0)
+            self._on_boxcal_cam_selected()
+
+    def _on_boxcal_cam_selected(self, _event=None):
+        cfg = getattr(self, "_boxcal_cam_cfg", None)
+        if cfg is None:
+            return
+        selected = self._boxcal_cam_var.get()
+        for cam in cfg.get("cameras", []):
+            if cam["id"] == selected:
+                self.boxcal_intr.set(cam.get("intrinsics_file", ""))
+                break
 
     # ── Tab 2: Capture ────────────────────────────────────────────────────────
 
@@ -376,18 +479,41 @@ class App(tk.Tk):
     # ── Step runners ─────────────────────────────────────────────────────────
 
     def _run_calibrate(self):
-        self._run_command([
+        cmd = [
             PYTHON, "-m", "intrinsic_calibration.calibrate",
-            "--camera-id",     self.cal_id.get(),
-            "--images-dir",    self.cal_imgs.get(),
-            "--output",        self.cal_out.get(),
-            "--squares-x",     self.cal_sq_x.get(),
-            "--squares-y",     self.cal_sq_y.get(),
-            "--square-length", self.cal_sq_len.get(),
-            "--marker-length", self.cal_mk_len.get(),
-            "--dict",          self.cal_dict.get(),
-            "--max-reproj-px", self.cal_reproj.get(),
-        ], "Intrinsic Calibration")
+            "--camera-id",       self.cal_id.get(),
+            "--images-dir",      self.cal_imgs.get(),
+            "--squares-x",       self.cal_sq_x.get(),
+            "--squares-y",       self.cal_sq_y.get(),
+            "--square-length",   self.cal_sq_len.get(),
+            "--marker-length",   self.cal_mk_len.get(),
+            "--dict",            self.cal_dict.get(),
+            "--max-reproj-px",   self.cal_reproj.get(),
+        ]
+        # prefer explicit output field; fall back to deriving from cameras.yaml
+        if self.cal_out.get().strip():
+            cmd += ["--output", self.cal_out.get()]
+        elif self.v_cams.get().strip():
+            cmd += ["--cameras-config", self.v_cams.get()]
+        else:
+            messagebox.showerror("Missing path",
+                                 "Set Output YAML or load a camera from Cameras config.")
+            return
+        self._run_command(cmd, "Intrinsic Calibration")
+
+    def _run_box_cal(self):
+        cmd = [
+            PYTHON, "-m", "box_calibration.calibrate",
+            "--images-dir",    self.boxcal_imgs.get(),
+            "--intrinsics",    self.boxcal_intr.get(),
+            "--box-config",    self.v_box.get(),
+            "--output",        self.boxcal_out.get(),
+            "--min-markers",   self.boxcal_min_mk.get(),
+            "--max-reproj-px", self.boxcal_reproj.get(),
+        ]
+        if self.boxcal_dbg.get().strip():
+            cmd += ["--debug-dir", self.boxcal_dbg.get()]
+        self._run_command(cmd, "Box Marker Calibration")
 
     def _run_list_cameras(self):
         self._run_command(

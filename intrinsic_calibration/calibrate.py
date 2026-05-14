@@ -25,7 +25,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CameraIntrinsics
-from common.io_utils import save_intrinsics
+from common.io_utils import load_yaml, save_intrinsics
 
 
 # ── ArUco API compatibility ───────────────────────────────────────────────────
@@ -257,9 +257,13 @@ def calibrate_camera(
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="ChArUco intrinsic calibration")
-    p.add_argument("--camera-id", required=True)
+    p.add_argument("--camera-id", required=True,
+                   help="Camera ID (must match 'id' field in cameras.yaml)")
     p.add_argument("--images-dir", required=True, type=Path)
-    p.add_argument("--output", required=True, type=Path)
+    p.add_argument("--cameras-config", type=Path, default=None,
+                   help="cameras.yaml — derives --output from the camera's intrinsics_file")
+    p.add_argument("--output", type=Path, default=None,
+                   help="Output YAML path (required if --cameras-config is not provided)")
     p.add_argument("--squares-x", type=int, default=8)
     p.add_argument("--squares-y", type=int, default=11)
     p.add_argument("--square-length", type=float, default=0.015,
@@ -273,8 +277,26 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _resolve_output(args: argparse.Namespace) -> Path:
+    """Return output path: explicit --output, or derived from cameras.yaml intrinsics_file."""
+    if args.output is not None:
+        return args.output
+    if args.cameras_config is None:
+        sys.exit("Provide --output or --cameras-config to derive the output path.")
+    cam_cfg = load_yaml(args.cameras_config)
+    matches = [c for c in cam_cfg["cameras"] if c["id"] == args.camera_id]
+    if not matches:
+        sys.exit(
+            f"Camera '{args.camera_id}' not found in {args.cameras_config}. "
+            f"Available: {[c['id'] for c in cam_cfg['cameras']]}"
+        )
+    return Path(matches[0]["intrinsics_file"])
+
+
 def main() -> None:
     args = _parse_args()
+    output = _resolve_output(args)
+
     image_paths = sorted(
         p for p in args.images_dir.iterdir()
         if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"}
@@ -292,8 +314,8 @@ def main() -> None:
         dict_name=args.dict,
         max_reproj_px=args.max_reproj_px,
     )
-    save_intrinsics(intr, args.output)
-    print(f"\nSaved intrinsics to {args.output}")
+    save_intrinsics(intr, output)
+    print(f"\nSaved intrinsics to {output}")
     print(f"  K =\n{intr.K}")
     print(f"  dist = {intr.dist}")
     print(f"  resolution = {intr.resolution}")

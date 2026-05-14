@@ -13,9 +13,12 @@ AcousticLevitation/
 │   └── cameras.yaml              # Camera IDs, serials, intrinsics paths, capture settings
 ├── common/
 │   ├── __init__.py               # Shared data classes
-│   └── io_utils.py               # YAML/JSON I/O helpers
+│   ├── io_utils.py               # YAML/JSON I/O helpers
+│   └── se3_utils.py              # SE(3) Lie algebra utilities
 ├── intrinsic_calibration/
 │   └── calibrate.py              # Per-camera lens calibration via ChArUco board
+├── box_calibration/
+│   └── calibrate.py              # Refine marker positions via bundle adjustment
 ├── capture/
 │   └── capture.py                # Multi-camera frame capture
 ├── extrinsic_solver/
@@ -44,7 +47,9 @@ AcousticLevitation/
 | `config/` | `cameras.yaml` | Camera IDs, serials, intrinsics paths, capture settings |
 | `common/` | `__init__.py` | All shared data classes (`CameraIntrinsics`, `CameraPose`, `BallDetection2D`, `TriangulationResult`, `ErrorBudget`, `ComparisonResult`) |
 | `common/` | `io_utils.py` | YAML/JSON I/O, intrinsics load/save, box config loader, numpy serializer |
+| `common/` | `se3_utils.py` | SE(3) Lie algebra: `_hat`, `_se3_log`, `_se3_exp`, `_average_se3` |
 | `intrinsic_calibration/` | `calibrate.py` | ChArUco detection (new + legacy API), per-image outlier rejection, saves YAML |
+| `box_calibration/` | `calibrate.py` | Bundle adjustment to refine marker center positions; writes `corners_box_frame` back to `box.yaml` |
 | `capture/` | `capture.py` | UVC autofocus/auto-exposure disable, N-frame capture per camera, metadata JSON |
 | `extrinsic_solver/` | `solve.py` | ArUco board pose via `estimatePoseBoard`, SE(3) Lie algebra averaging over frames |
 | `ball_detector/` | `detect.py` | Optional background subtraction (absdiff) → Otsu threshold → numbered blob selection UI or auto-largest → Canny edge circle fit (LSQ) → temporal averaging |
@@ -189,11 +194,6 @@ The solver requires ≥ 3 markers from ≥ 2 different faces per frame. More mar
 
 Just fill in box size, marker size, and which ID is on which face:
 
- Why it's high: all images shot overhead at steep angles from same distance. Calibration can't cleanly separate
-  distortion from focal length without:
-  1. Images at different distances (close + far)
-  2. Board at different positions in the frame — corners, edges (not always centered)
-  3. Angles ≤ 45°, not near edge-on
 ```yaml
 box_dimensions:
   width_mm:  120.0    # measure with calipers
@@ -265,8 +265,9 @@ python gui.py
 │  Sim output    [___________________________]  […]        │
 └───────────────────────────────────────────────────────────┘
 ┌─ Tabs ────────────────────────────────────────────────────┐
-│ 1·Calibrate │ 2·Capture │ 3·Extrinsic │ 4·Ball Detect    │
-│ 5·Triangulate │ 6·Error Prop │ 7·Compare │ ★ Full Pipeline│
+│ 1·Calibrate │ 1b·Box Cal │ 2·Capture │ 3·Extrinsic      │
+│ 4·Ball Detect │ 5·Triangulate │ 6·Error Prop │ 7·Compare │
+│ ★ Full Pipeline                                           │
 │                                                           │
 │  [ step-specific params + ▶ Run button ]                  │
 └───────────────────────────────────────────────────────────┘
@@ -280,6 +281,7 @@ python gui.py
 | Tab | What it runs |
 |---|---|
 | **1 · Calibrate** | `intrinsic_calibration.calibrate` — per-camera ChArUco calibration |
+| **1b · Box Cal** | `box_calibration.calibrate` — refine marker positions via bundle adjustment |
 | **2 · Capture** | `capture.capture` — list cameras or capture N frames per camera |
 | **3 · Extrinsic** | `extrinsic_solver.solve` — camera pose from ArUco board |
 | **4 · Ball Detect** | `ball_detector.detect` — blob selection + sub-pixel circle fit; background subtraction options |
@@ -374,6 +376,37 @@ python -m intrinsic_calibration.calibrate \
 | `--max-reproj-px` | `1.0` | Per-image reprojection error threshold for outlier rejection |
 
 Repeat for every camera. Saves `calibration/<camera_id>_intrinsics.yaml` per camera.
+
+---
+
+### Step 1b — Box Marker Calibration (optional, one-time)
+
+If manually measuring marker positions to sub-millimeter accuracy is impractical, run bundle adjustment to refine them from images. Capture 10–30 images of the box from varied angles using a single pre-calibrated camera, then:
+
+```bash
+python -m box_calibration.calibrate \
+    --images-dir  data/box_calib/ \
+    --intrinsics  calibration/cam_front_intrinsics.yaml \
+    --box-config  config/box.yaml \
+    --output      config/box.yaml \
+    --min-markers 3 \
+    --max-reproj-px 1.5 \
+    --debug-dir   debug/box_cal/
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `--images-dir` | required | Directory of calibration images (jpg/png) |
+| `--intrinsics` | required | Intrinsics YAML for the camera used |
+| `--box-config` | `config/box.yaml` | Input box config (needs `face` on every marker) |
+| `--output` | `config/box.yaml` | Destination (can overwrite input) |
+| `--min-markers` | `3` | Min visible markers per image for acceptance |
+| `--max-reproj-px` | `1.5` | Warn if final RMS exceeds this value |
+| `--debug-dir` | off | Save annotated images (green = detected, red = reprojected refined) |
+
+The optimizer jointly solves per-image camera poses and per-marker center offsets + in-plane rotation, with each marker constrained to its declared face plane by the parameterization. On success the refined `corners_box_frame` values (mm) are written into `box.yaml`; the `face` key is preserved for documentation.
+
+**Shooting tips:** vary azimuth by 30–60° between shots, include steep angles to constrain depth. Require at least 3 different markers per image. Final RMS should be ≤ 1 px; values > 1.5 px warrant inspection of the debug images.
 
 ---
 
@@ -677,3 +710,5 @@ Run these before collecting real data to confirm the triangulation core is healt
 **Mahalanobis-weighted triangulation.** LM refinement weights each camera's residual by its 2D covariance (inverse), not Euclidean distance. Cameras with more frames (lower noise) contribute more.
 
 **3D covariance from Jacobian.** `Σ_3D = (JᵀWJ)⁻¹` at the LM optimum gives a principled uncertainty estimate that reflects both 2D noise levels and geometric dilution.
+
+**Face-plane-constrained marker bundle adjustment.** Box calibration parameterizes each marker as `(du, dv, angle)` — translation along the face's two in-plane axes plus in-plane rotation. The constraint is enforced by construction (no post-hoc projection needed), so the optimizer never proposes corners off the face plane. This collapses the per-marker DOF from 12 (4 free corners × 3) to 3 while keeping the physically meaningful degrees of freedom.
