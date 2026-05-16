@@ -169,7 +169,7 @@ def capture_session(
     session_meta["cameras"] = [m for m in cam_metas if m is not None]
 
     meta_path = output_dir / "metadata.json"
-    with open(meta_path, "w") as f:
+    with open(meta_path, "w", encoding="UTF-8") as f:
         json.dump(session_meta, f, indent=2)
     print(f"\nSession metadata saved to {meta_path}")
     return output_dir
@@ -188,7 +188,7 @@ def _read_resolution(path: Path) -> list[int] | None:
 def _v4l2_device_name(idx: int) -> str:
     name_path = Path(f"/sys/class/video4linux/video{idx}/name")
     try:
-        return name_path.read_text().strip()
+        return name_path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
         return ""
 

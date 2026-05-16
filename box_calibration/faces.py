@@ -59,10 +59,18 @@ FACE_TABLE: dict[str, dict] = {
 }
 
 
-def nominal_pose(face: str, center_m: np.ndarray) -> np.ndarray:
+def nominal_pose(face: str, center_m: np.ndarray, rotation_rad: float = 0.0) -> np.ndarray:
     """4×4 SE(3) T_box_marker: marker local frame → box frame."""
     ft = FACE_TABLE[face]
-    R = np.column_stack([ft["r"], ft["u"], ft["normal"]])
+    base = np.column_stack([ft["r"], ft["u"], ft["normal"]])
+    c = float(np.cos(rotation_rad))
+    s = float(np.sin(rotation_rad))
+    Rz = np.array([
+        [ c, -s, 0.0],
+        [ s,  c, 0.0],
+        [0.0, 0.0, 1.0],
+    ], dtype=np.float64)
+    R = base @ Rz
     T = np.eye(4)
     T[:3, :3] = R
     T[:3, 3] = center_m
@@ -117,9 +125,10 @@ def build_box_model(box_cfg: dict) -> BoxModel:
             raise ValueError(f"Marker {m.get('id','?')} has no 'face' key in box config.")
         face = m["face"]
         ctr = nominal_center_m(m, W, D, H)
+        rotation_rad = np.radians(float(m.get("rotation_deg", 0.0)))
         ids.append(int(m["id"]))
         faces.append(face)
-        poses.append(nominal_pose(face, ctr))
+        poses.append(nominal_pose(face, ctr, rotation_rad))
         centers.append(ctr)
 
     return BoxModel(

@@ -1,0 +1,23 @@
+camera_id: cam_1
+resolution:
+- 640
+- 480
+camera_matrix:
+- - 379.7858825179369
+  - 0.0
+  - 306.1143608960748
+- - 0.0
+  - 507.2114321887795
+  - 239.32233558954463
+- - 0.0
+  - 0.0
+  - 1.0
+distortion_coefficients:
+- 0.09668113826239758
+- -0.23878784440379727
+- -0.0040806858543720745
+- -0.00012304544693017387
+- 0.12668438816916502
+reprojection_error_px: 0.6527832410673355
+source_intrinsics: calibration/cam_front_intrinsics.yaml
+scaling_note: scaled from 1920x1080 to 640x480 for existing box calibration photos

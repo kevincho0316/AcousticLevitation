@@ -64,7 +64,7 @@ def load_sim_trap(sim_output_path: Path, rank: int = 1) -> np.ndarray:
         return np.array([target["newton_x"], target["newton_y"], target["newton_z"]], dtype=np.float64)
 
     elif suffix == ".csv":
-        with open(sim_output_path, newline="") as f:
+        with open(sim_output_path, newline="",encoding='UTF-8') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 if int(row["rank"]) == rank:

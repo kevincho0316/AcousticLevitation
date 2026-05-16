@@ -196,11 +196,11 @@ Just fill in box size, marker size, and which ID is on which face:
 
 ```yaml
 box_dimensions:
-  width_mm:  120.0    # measure with calipers
-  depth_mm:  120.0
-  height_mm:  60.0
-
-marker_side_mm: 29.8  # measure printed size with calipers — NOT design size
+  width_mm: 80.0
+  depth_mm: 80.0
+  height_mm: 30.0
+aruco_dictionary: DICT_4X4_50
+marker_side_mm: 15.0
 
 markers:
   - id: 0
@@ -217,19 +217,19 @@ markers:
 
   - id: 4
     face: top
-    center_box_mm: [30.0, 60.0, 30.0]   # front-left quadrant
+    center_box_mm: [7.5, 30.0, 7.5]   # front-left quadrant
 
   - id: 5
     face: top
-    center_box_mm: [90.0, 60.0, 30.0]   # front-right quadrant
+    center_box_mm: [72.5, 30.0, 7.5]   # front-right quadrant
 
   - id: 6
     face: top
-    center_box_mm: [30.0, 60.0, 90.0]   # back-left quadrant
+    center_box_mm: [7.5, 30.0, 72.5]   # back-left quadrant
 
   - id: 7
     face: top
-    center_box_mm: [90.0, 60.0, 90.0]   # back-right quadrant
+    center_box_mm: [72.5, 30.0, 72.5]   # back-right quadrant
 ```
 
 The software computes all 4 corner positions per marker automatically. You do **not** need to measure individual corner coordinates unless your markers are off-centre, in which case add `center_box_mm: [x, y, z]` with the actual centre measured in box frame.

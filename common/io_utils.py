@@ -86,22 +86,36 @@ _FACE_AXES: dict[str, dict] = {
 }
 
 
-def _marker_corners_m(marker: dict, W: float, D: float, H: float, s: float) -> np.ndarray:
-    """Return (4,3) corner positions in box frame (meters).
+def _marker_corners_m(marker: dict, W: float, D: float, H: float, s: float) -> np.ndarray | None:
+    """Return (4,3) corner positions in box frame (meters), or None if unknown.
 
     Two ways to place a marker:
       a) Explicit: ``corners_box_frame`` list of 4 × [x,y,z] in mm → just convert.
       b) Auto: ``face`` + optional ``center_box_mm: [x,y,z]``
                If center_box_mm is omitted the marker is centred on its face.
+
+    If neither corners_box_frame nor face is present, returns None. This is the
+    pre-calibration state for full self-calibration runs, which seed marker
+    poses from the images themselves.
     """
     # Explicit corners take priority — backward-compatible with old configs.
     if "corners_box_frame" in marker:
         return np.array(marker["corners_box_frame"], dtype=np.float64) / 1000.0
 
+    if "face" not in marker:
+        return None
+
     face = marker["face"]
     axes = _FACE_AXES[face]
     r_vec = axes["r"].astype(np.float64)
     u_vec = axes["u"].astype(np.float64)
+    rot = np.radians(float(marker.get("rotation_deg", 0.0)))
+    c_rot = np.cos(rot)
+    s_rot = np.sin(rot)
+    r_base = r_vec
+    u_base = u_vec
+    r_vec = c_rot * r_base + s_rot * u_base
+    u_vec = -s_rot * r_base + c_rot * u_base
 
     if "center_box_mm" in marker:
         center = np.array(marker["center_box_mm"], dtype=np.float64) / 1000.0
@@ -132,7 +146,9 @@ def load_box_config(path: str | Path) -> dict:
 
     for marker in cfg["markers"]:
         marker["corners_explicit"] = "corners_box_frame" in marker
-        marker["corners_box_frame_m"] = _marker_corners_m(marker, W, D, H, s)
+        corners = _marker_corners_m(marker, W, D, H, s)
+        if corners is not None:
+            marker["corners_box_frame_m"] = corners
 
     cfg["marker_side_m"] = s
     cfg["marker_position_uncertainty_m"] = cfg.get("marker_position_uncertainty_mm", 0.5) / 1000.0

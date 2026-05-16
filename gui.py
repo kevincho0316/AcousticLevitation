@@ -116,7 +116,7 @@ class App(tk.Tk):
             return
         try:
             import yaml
-            with open(path, "r") as f:
+            with open(path, "r",encoding='UTF-8') as f:
                 cfg = yaml.safe_load(f)
             ids = [c["id"] for c in cfg.get("cameras", [])]
         except Exception as exc:
@@ -178,7 +178,7 @@ class App(tk.Tk):
             return
         try:
             import yaml
-            with open(path, "r") as f:
+            with open(path, "r",encoding='UTF-8') as f:
                 cfg = yaml.safe_load(f)
             ids = [c["id"] for c in cfg.get("cameras", [])]
         except Exception as exc:
@@ -470,11 +470,14 @@ class App(tk.Tk):
             try:
                 env = os.environ.copy()
                 env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+                env["PYTHONIOENCODING"] = "utf-8"
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     cwd=str(ROOT),
                     env=env,
                     bufsize=1,
@@ -661,7 +664,9 @@ _CV_BACKEND = cv2.CAP_V4L2 if sys.platform != "win32" else cv2.CAP_DSHOW
 
 def _cam_device_name(idx: int) -> str:
     try:
-        return Path(f"/sys/class/video4linux/video{idx}/name").read_text().strip()
+        return Path(f"/sys/class/video4linux/video{idx}/name").read_text(
+            encoding="utf-8", errors="replace"
+        ).strip()
     except OSError:
         return f"camera {idx}"
 
@@ -671,7 +676,7 @@ def _is_capture_device(idx: int) -> bool:
     try:
         caps_hex = Path(
             f"/sys/class/video4linux/video{idx}/device/capabilities"
-        ).read_text().strip()
+        ).read_text(encoding="utf-8", errors="replace").strip()
         return bool(int(caps_hex, 16) & 0x00000001)  # V4L2_CAP_VIDEO_CAPTURE
     except Exception:
         return True  # can't tell — try anyway
@@ -705,7 +710,7 @@ def _build_index_to_cfg(config_path: str) -> dict[int, dict]:
         return {}
     try:
         import yaml
-        with open(config_path, "r") as f:
+        with open(config_path, "r", encoding='UTF-8') as f:
             cfg = yaml.safe_load(f)
         serial_to_index: dict[str, int] = cfg.get("serial_to_index", {})
         serial_to_cfg = {c["serial"]: c for c in cfg.get("cameras", []) if "serial" in c}

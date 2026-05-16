@@ -99,5 +99,5 @@ class SyntheticScene:
             "ball_radius_m": self.ball_radius_m,
             "aruco_dict_name": self.aruco_dict_name,
         }
-        with open(path, "w") as f:
+        with open(path, "w", encoding="UTF-8") as f:
             json.dump(data, f, indent=2)
