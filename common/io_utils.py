@@ -131,6 +131,7 @@ def load_box_config(path: str | Path) -> dict:
     s = float(cfg["marker_side_mm"]) / 1000.0
 
     for marker in cfg["markers"]:
+        marker["corners_explicit"] = "corners_box_frame" in marker
         marker["corners_box_frame_m"] = _marker_corners_m(marker, W, D, H, s)
 
     cfg["marker_side_m"] = s

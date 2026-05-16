@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-05-15T01:04:18.976205+00:00",
+  "n_frames_requested": 200,
+  "cameras": [
+    {
+      "id": "cam_1",
+      "serial": "ABC123",
+      "device_index": 0,
+      "n_frames_captured": 200,
+      "resolution_actual": [
+        1280,
+        720
+      ],
+      "resolution_requested": [
+        1920,
+        1080
+      ],
+      "exposure": -2,
+      "focus": 0,
+      "elapsed_s": 27.54
+    },
+    {
+      "id": "cam_3",
+      "serial": "GHI789",
+      "device_index": 2,
+      "n_frames_captured": 200,
+      "resolution_actual": [
+        1920,
+        1080
+      ],
+      "resolution_requested": [
+        1920,
+        1080
+      ],
+      "exposure": -2,
+      "focus": 0,
+      "elapsed_s": 64.57
+    }
+  ]
+}

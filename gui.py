@@ -11,9 +11,13 @@ import os
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
+
+import cv2
+from PIL import Image, ImageTk
 
 PYTHON = sys.executable
 ROOT   = Path(__file__).resolve().parent
@@ -65,7 +69,9 @@ class App(tk.Tk):
         self._tab_calibrate()
         self._tab_box_cal()
         self._tab_capture()
+        self._tab_live_preview()
         self._tab_extrinsic()
+        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed, add="+")
         self._tab_detect()
         self._tab_triangulate()
         self._tab_error_prop()
@@ -210,6 +216,25 @@ class App(tk.Tk):
         ttk.Button(bf, text="▶  Capture Session",
                    command=self._run_capture).pack(side="left", padx=6,
                                                    ipadx=8, ipady=4)
+        ttk.Button(bf, text="📷  Camera Preview",
+                   command=self._open_camera_preview).pack(side="left", padx=6,
+                                                           ipadx=8, ipady=4)
+
+    # ── Tab 2b: Live camera preview ───────────────────────────────────────────
+
+    def _tab_live_preview(self):
+        f = ttk.Frame(self.nb, padding=0)
+        self.nb.add(f, text="📷 Preview")
+        self._preview_tab_id = str(f)
+        self._preview = _EmbeddedPreview(f, self)
+
+    def _on_tab_changed(self, _event=None):
+        if not hasattr(self, "_preview"):
+            return
+        if self.nb.select() == self._preview_tab_id:
+            self._preview.start()
+        else:
+            self._preview.stop()
 
     # ── Tab 3: Extrinsic solver ───────────────────────────────────────────────
 
@@ -593,6 +618,13 @@ class App(tk.Tk):
             "--sim-rank",     self.cmp_rank.get(),
         ], "Comparison")
 
+    # ── Camera preview ────────────────────────────────────────────────────────
+
+    def _open_camera_preview(self):
+        _CameraPreviewWindow(self, self.v_cams.get().strip(), self.v_session.get().strip())
+
+    # ── Step runners ── full pipeline (kept below) ────────────────────────────
+
     def _run_full_pipeline(self):
         if not self._check_session(): return
         if not self.v_sim.get().strip():
@@ -620,6 +652,562 @@ class App(tk.Tk):
         if self.fp_bg_mode.get() == "median":
             cmd.append("--median-background")
         self._run_command(cmd, "Full Pipeline")
+
+
+# ── Camera preview helpers ─────────────────────────────────────────────────
+
+_CV_BACKEND = cv2.CAP_V4L2 if sys.platform != "win32" else cv2.CAP_DSHOW
+
+
+def _cam_device_name(idx: int) -> str:
+    try:
+        return Path(f"/sys/class/video4linux/video{idx}/name").read_text().strip()
+    except OSError:
+        return f"camera {idx}"
+
+
+def _is_capture_device(idx: int) -> bool:
+    """Check sysfs capabilities flag — skips metadata/output-only V4L2 devices."""
+    try:
+        caps_hex = Path(
+            f"/sys/class/video4linux/video{idx}/device/capabilities"
+        ).read_text().strip()
+        return bool(int(caps_hex, 16) & 0x00000001)  # V4L2_CAP_VIDEO_CAPTURE
+    except Exception:
+        return True  # can't tell — try anyway
+
+
+def _detect_cameras(max_index: int = 10) -> list[int]:
+    found = []
+    # Suppress OpenCV V4L2 stderr warnings for non-capture nodes
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    old_stderr = os.dup(2)
+    os.dup2(devnull, 2)
+    try:
+        for i in range(max_index):
+            if not _is_capture_device(i):
+                continue
+            cap = cv2.VideoCapture(i, _CV_BACKEND)
+            if cap.isOpened():
+                ok, _ = cap.read()
+                if ok:
+                    found.append(i)
+            cap.release()
+    finally:
+        os.dup2(old_stderr, 2)
+        os.close(old_stderr)
+        os.close(devnull)
+    return found
+
+
+def _build_index_to_cfg(config_path: str) -> dict[int, dict]:
+    if not config_path:
+        return {}
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            cfg = yaml.safe_load(f)
+        serial_to_index: dict[str, int] = cfg.get("serial_to_index", {})
+        serial_to_cfg = {c["serial"]: c for c in cfg.get("cameras", []) if "serial" in c}
+        return {idx: serial_to_cfg[s] for s, idx in serial_to_index.items()
+                if s in serial_to_cfg}
+    except Exception:
+        return {}
+
+
+def _open_cap(idx: int) -> cv2.VideoCapture:
+    cap = cv2.VideoCapture(idx, _CV_BACKEND)
+    # Buffer=1: always deliver latest frame; prevents burst-drain judder
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
+
+
+def _apply_cam_settings(cap: cv2.VideoCapture, cam_cfg: dict | None) -> None:
+    if cam_cfg is None:
+        return
+    res = cam_cfg.get("capture_resolution")
+    if res:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  res[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
+    for _ in range(20):
+        cap.read()
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+    focus = cam_cfg.get("focus")
+    if focus is not None:
+        cap.set(cv2.CAP_PROP_FOCUS, focus)
+    exposure = cam_cfg.get("exposure")
+    if exposure is not None:
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+        cap.set(cv2.CAP_PROP_EXPOSURE, exposure)
+        for _ in range(10):
+            cap.read()
+
+
+def _settings_str(cam_cfg: dict | None) -> str:
+    if cam_cfg is None:
+        return "no config"
+    return f"exp={cam_cfg.get('exposure','auto')}  foc={cam_cfg.get('focus','auto')}"
+
+
+class _CameraPreviewWindow:
+    FPS = 30
+
+    def __init__(self, parent: tk.Tk, config_path: str, session_dir: str) -> None:
+        self._output_dir = Path(session_dir) if session_dir else Path("captures")
+        self._output_dir.mkdir(parents=True, exist_ok=True)
+
+        self._win = tk.Toplevel(parent)
+        self._win.title("Camera Preview")
+        self._win.configure(bg="#1e1e1e")
+        self._win.protocol("WM_DELETE_WINDOW", self._quit)
+        self._win.bind("<q>", lambda _: self._quit())
+        self._win.bind("<Q>", lambda _: self._quit())
+        self._win.bind("<space>", lambda _: self._capture())
+
+        self._running = True
+        self._flash   = False
+
+        # detect cameras in background so GUI doesn't freeze
+        self._caps: dict[int, cv2.VideoCapture] = {}
+        self._indices: list[int] = []
+        self._index_to_cfg: dict[int, dict] = {}
+        self._active: int | None = None
+
+        # ── layout ────────────────────────────────────────────────────────────
+        self._frame_label = tk.Label(self._win, bg="black", text="Detecting cameras…",
+                                     fg="#888", font=("Helvetica", 12))
+        self._frame_label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._sidebar = tk.Frame(self._win, bg="#1e1e1e", width=230)
+        self._sidebar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._sidebar.pack_propagate(False)
+
+        tk.Label(self._sidebar, text="CAMERAS", bg="#1e1e1e", fg="#888",
+                 font=("Helvetica", 9, "bold")).pack(pady=(12, 4))
+
+        self._btn_frame = tk.Frame(self._sidebar, bg="#1e1e1e")
+        self._btn_frame.pack(fill=tk.X)
+
+        ttk.Separator(self._sidebar, orient="horizontal").pack(fill=tk.X, padx=8, pady=8)
+
+        self._capture_btn = tk.Button(
+            self._sidebar, text="CAPTURE  [SPACE]",
+            font=("Helvetica", 10, "bold"),
+            bg="#2e7d32", fg="white", activebackground="#43a047",
+            relief=tk.FLAT, padx=8, pady=10,
+            command=self._capture,
+        )
+        self._capture_btn.pack(fill=tk.X, padx=8, pady=2)
+
+        self._status = tk.Label(self._sidebar, text="", bg="#1e1e1e", fg="#aaa",
+                                font=("Helvetica", 8), wraplength=210, justify=tk.LEFT)
+        self._status.pack(padx=8, pady=6, anchor="w")
+
+        # detect + open cameras in background
+        threading.Thread(target=self._init_cameras, args=(config_path,),
+                         daemon=True).start()
+
+    def _init_cameras(self, config_path: str) -> None:
+        indices = _detect_cameras()
+        index_to_cfg = _build_index_to_cfg(config_path)
+
+        caps: dict[int, cv2.VideoCapture] = {}
+        for idx in indices:
+            cap = _open_cap(idx)
+            if not cap.isOpened():
+                continue
+            _apply_cam_settings(cap, index_to_cfg.get(idx))
+            caps[idx] = cap
+
+        self._caps        = caps
+        self._indices     = list(caps.keys())
+        self._index_to_cfg = index_to_cfg
+
+        if self._indices:
+            self._active = self._indices[0]
+            self._win.after(0, self._build_cam_buttons)
+            self._win.after(0, self._schedule_frame)
+        else:
+            self._win.after(0, lambda: self._frame_label.configure(
+                text="No cameras found.", fg="#f48771"))
+
+    def _build_cam_buttons(self) -> None:
+        for w in self._btn_frame.winfo_children():
+            w.destroy()
+        self._cam_btns: dict[int, tk.Button] = {}
+        for idx in self._indices:
+            name  = _cam_device_name(idx)
+            short = name if len(name) <= 20 else name[:19] + "…"
+            cfg_s = _settings_str(self._index_to_cfg.get(idx))
+            btn = tk.Button(
+                self._btn_frame,
+                text=f"[{idx}] {short}\n{cfg_s}",
+                anchor="w", justify=tk.LEFT,
+                font=("Helvetica", 9),
+                bg="#3a3a3a", fg="#ddd", activebackground="#4a7c4a",
+                relief=tk.FLAT, padx=8, pady=6,
+                command=lambda i=idx: self._switch(i),
+            )
+            btn.pack(fill=tk.X, padx=8, pady=3)
+            self._cam_btns[idx] = btn
+        self._refresh_buttons()
+
+    def _switch(self, idx: int) -> None:
+        self._active = idx
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        for idx, btn in self._cam_btns.items():
+            btn.configure(bg="#2e7d32" if idx == self._active else "#3a3a3a",
+                          fg="white"   if idx == self._active else "#ddd")
+
+    def _schedule_frame(self) -> None:
+        if self._running:
+            self._win.after(1000 // self.FPS, self._update_frame)
+
+    def _update_frame(self) -> None:
+        if self._active is None:
+            self._schedule_frame()
+            return
+        cap = self._caps.get(self._active)
+        if cap:
+            ok, frame = cap.read()
+            if ok:
+                if self._flash:
+                    overlay = frame.copy()
+                    overlay[:] = (0, 200, 0)
+                    frame = cv2.addWeighted(frame, 0.55, overlay, 0.45, 0)
+                    self._flash = False
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = ImageTk.PhotoImage(Image.fromarray(rgb))
+                self._frame_label.configure(image=img, text="")
+                self._frame_label.image = img
+        self._schedule_frame()
+
+    def _capture(self) -> None:
+        if self._active is None:
+            return
+        cap = self._caps.get(self._active)
+        if not cap:
+            return
+        ok, frame = cap.read()
+        if not ok:
+            return
+        ts  = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out = self._output_dir / f"cam{self._active}_{ts}.png"
+        cv2.imwrite(str(out), frame)
+        self._flash = True
+        self._status.configure(text=f"Saved:\n{out.name}", fg="#81c784")
+        self._win.after(3000, lambda: self._status.configure(text=""))
+
+    def _quit(self) -> None:
+        self._running = False
+        for cap in self._caps.values():
+            cap.release()
+        self._win.destroy()
+
+
+class _EmbeddedPreview:
+    """Live webcam preview embedded in a notebook tab. Space bar captures."""
+
+    FPS = 30
+
+    def __init__(self, parent: ttk.Frame, app: "App") -> None:
+        self._app     = app
+        self._running = False
+        self._flash   = False
+        self._caps:         dict[int, cv2.VideoCapture] = {}
+        self._indices:      list[int]                   = []
+        self._index_to_cfg: dict[int, dict]             = {}
+        self._active:       int | None                  = None
+        self._after_id:     str | None                  = None
+        self._cam_btns:     dict[int, tk.Button]        = {}
+
+        # Frame reader runs in a background thread; main thread only calls
+        # ImageTk.PhotoImage (must be on main thread) and canvas update.
+        self._frame_lock   = threading.Lock()
+        self._latest_raw:  "cv2.Mat | None" = None   # BGR full-res → saved on capture
+        self._latest_disp: "cv2.Mat | None" = None   # RGB resized  → displayed
+        self._reader_running = False
+        self._reader_thread: threading.Thread | None = None
+        self._cap_lock = threading.Lock()             # guards cap.read / cap.set
+
+        # Canvas instead of Label: its size never changes on image update, so
+        # the rest of the GUI layout stays stable.
+        self._canvas = tk.Canvas(parent, bg="black", highlightthickness=0)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._canvas_img_id: int | None = None
+        self._canvas_txt_id: int = self._canvas.create_text(
+            320, 240,
+            text="Switch to this tab to start preview.",
+            fill="#888", font=("Helvetica", 12))
+        self._disp_w = 640
+        self._disp_h = 480
+        self._canvas.bind("<Configure>", self._on_canvas_resize)
+
+        sb = tk.Frame(parent, bg="#1e1e1e", width=230)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        sb.pack_propagate(False)
+
+        tk.Label(sb, text="CAMERAS", bg="#1e1e1e", fg="#888",
+                 font=("Helvetica", 9, "bold")).pack(pady=(12, 4))
+
+        self._btn_frame = tk.Frame(sb, bg="#1e1e1e")
+        self._btn_frame.pack(fill=tk.X)
+
+        ttk.Separator(sb, orient="horizontal").pack(fill=tk.X, padx=8, pady=8)
+
+        tk.Button(
+            sb, text="↺  Reload Cameras",
+            font=("Helvetica", 9),
+            bg="#37474f", fg="#ddd", activebackground="#546e7a",
+            relief=tk.FLAT, padx=8, pady=6,
+            command=self._reload,
+        ).pack(fill=tk.X, padx=8, pady=(0, 4))
+
+        # manual exposure override
+        exp_row = tk.Frame(sb, bg="#1e1e1e")
+        exp_row.pack(fill=tk.X, padx=8, pady=(0, 6))
+        tk.Label(exp_row, text="Exposure:", bg="#1e1e1e", fg="#aaa",
+                 font=("Helvetica", 8)).pack(side=tk.LEFT)
+        self._exp_var = tk.StringVar(value="")
+        tk.Entry(exp_row, textvariable=self._exp_var, width=7,
+                 bg="#2d2d2d", fg="white", insertbackground="white",
+                 relief=tk.FLAT).pack(side=tk.LEFT, padx=(4, 4))
+        tk.Button(exp_row, text="Set", font=("Helvetica", 8),
+                  bg="#37474f", fg="#ddd", activebackground="#546e7a",
+                  relief=tk.FLAT, padx=4,
+                  command=self._apply_exposure).pack(side=tk.LEFT)
+
+        tk.Button(
+            sb, text="CAPTURE  [SPACE]",
+            font=("Helvetica", 10, "bold"),
+            bg="#2e7d32", fg="white", activebackground="#43a047",
+            relief=tk.FLAT, padx=8, pady=10,
+            command=self._capture,
+        ).pack(fill=tk.X, padx=8, pady=2)
+
+        self._status = tk.Label(sb, text="", bg="#1e1e1e", fg="#aaa",
+                                font=("Helvetica", 8), wraplength=210, justify=tk.LEFT)
+        self._status.pack(padx=8, pady=6, anchor="w")
+
+        app.bind("<space>", lambda _e: self._on_space(), add="+")
+
+    def _on_canvas_resize(self, event) -> None:
+        self._disp_w = event.width
+        self._disp_h = event.height
+        self._canvas.coords(self._canvas_txt_id, event.width // 2, event.height // 2)
+
+    def _on_space(self) -> None:
+        if self._running:
+            self._capture()
+
+    def _reload(self) -> None:
+        self.stop()
+        for cap in self._caps.values():
+            cap.release()
+        self._caps         = {}
+        self._indices      = []
+        self._index_to_cfg = {}
+        self._active       = None
+        self._cam_btns     = {}
+        with self._frame_lock:
+            self._latest_raw  = None
+            self._latest_disp = None
+        for w in self._btn_frame.winfo_children():
+            w.destroy()
+        self._canvas.itemconfig(self._canvas_txt_id,
+                                text="Reloading cameras…", fill="#888")
+        if self._canvas_img_id is not None:
+            self._canvas.delete(self._canvas_img_id)
+            self._canvas_img_id = None
+        self.start()
+
+    def _apply_exposure(self) -> None:
+        if self._active is None:
+            return
+        cap = self._caps.get(self._active)
+        if not cap:
+            return
+        try:
+            val = float(self._exp_var.get())
+        except ValueError:
+            self._status.configure(text="Bad exposure value.", fg="#f48771")
+            return
+        # _cap_lock prevents collision with the reader thread
+        with self._cap_lock:
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+            cap.set(cv2.CAP_PROP_EXPOSURE, val)
+        self._status.configure(text=f"Exposure → {val}", fg="#81c784")
+        self._app.after(2000, lambda: self._status.configure(text=""))
+
+    def _start_reader(self) -> None:
+        self._reader_running = True
+        if self._reader_thread is None or not self._reader_thread.is_alive():
+            self._reader_thread = threading.Thread(
+                target=self._reader_loop, daemon=True)
+            self._reader_thread.start()
+
+    def _reader_loop(self) -> None:
+        import time
+        while self._reader_running:
+            active = self._active
+            cap = self._caps.get(active) if active is not None else None
+            if not cap:
+                time.sleep(0.05)
+                continue
+            with self._cap_lock:
+                ok, frame = cap.read()
+            if not ok:
+                time.sleep(0.05)
+                continue
+            # apply flash overlay before resize
+            if self._flash:
+                overlay = frame.copy()
+                overlay[:] = (0, 200, 0)
+                display = cv2.addWeighted(frame, 0.55, overlay, 0.45, 0)
+                self._flash = False
+            else:
+                display = frame
+            # resize to current canvas dimensions off the main thread
+            h, w = display.shape[:2]
+            dw, dh = self._disp_w, self._disp_h
+            if dw > 0 and dh > 0:
+                scale = min(dw / w, dh / h)
+                if scale < 1.0:
+                    display = cv2.resize(
+                        display,
+                        (max(1, int(w * scale)), max(1, int(h * scale))),
+                        interpolation=cv2.INTER_AREA,
+                    )
+            rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+            with self._frame_lock:
+                self._latest_raw  = frame   # original BGR for saving
+                self._latest_disp = rgb     # resized RGB for display
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        if not self._caps:
+            self._canvas.itemconfig(self._canvas_txt_id,
+                                    text="Detecting cameras…", fill="#888")
+            config_path = self._app.v_cams.get().strip()
+            threading.Thread(target=self._init_cameras, args=(config_path,),
+                             daemon=True).start()
+        else:
+            self._start_reader()
+            self._schedule_frame()
+
+    def stop(self) -> None:
+        self._running        = False
+        self._reader_running = False
+        if self._after_id:
+            try:
+                self._app.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _init_cameras(self, config_path: str) -> None:
+        indices       = _detect_cameras()
+        index_to_cfg  = _build_index_to_cfg(config_path)
+        caps: dict[int, cv2.VideoCapture] = {}
+        for idx in indices:
+            cap = _open_cap(idx)
+            if not cap.isOpened():
+                continue
+            _apply_cam_settings(cap, index_to_cfg.get(idx))
+            caps[idx] = cap
+
+        self._caps         = caps
+        self._indices      = list(caps.keys())
+        self._index_to_cfg = index_to_cfg
+
+        if self._indices:
+            self._active = self._indices[0]
+            self._app.after(0, self._build_cam_buttons)
+            if self._running:
+                self._start_reader()
+                self._app.after(0, self._schedule_frame)
+        else:
+            self._app.after(0, lambda: self._canvas.itemconfig(
+                self._canvas_txt_id, text="No cameras found.", fill="#f48771"))
+
+    def _build_cam_buttons(self) -> None:
+        for w in self._btn_frame.winfo_children():
+            w.destroy()
+        self._cam_btns = {}
+        for idx in self._indices:
+            name  = _cam_device_name(idx)
+            short = name if len(name) <= 20 else name[:19] + "…"
+            cfg_s = _settings_str(self._index_to_cfg.get(idx))
+            btn = tk.Button(
+                self._btn_frame,
+                text=f"[{idx}] {short}\n{cfg_s}",
+                anchor="w", justify=tk.LEFT,
+                font=("Helvetica", 9),
+                bg="#3a3a3a", fg="#ddd", activebackground="#4a7c4a",
+                relief=tk.FLAT, padx=8, pady=6,
+                command=lambda i=idx: self._switch(i),
+            )
+            btn.pack(fill=tk.X, padx=8, pady=3)
+            self._cam_btns[idx] = btn
+        self._refresh_buttons()
+
+    def _switch(self, idx: int) -> None:
+        self._active = idx
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        for idx, btn in self._cam_btns.items():
+            btn.configure(
+                bg="#2e7d32" if idx == self._active else "#3a3a3a",
+                fg="white"   if idx == self._active else "#ddd",
+            )
+
+    def _schedule_frame(self) -> None:
+        if self._running:
+            self._after_id = self._app.after(1000 // self.FPS, self._update_frame)
+
+    def _update_frame(self) -> None:
+        if not self._running or self._active is None:
+            self._schedule_frame()
+            return
+        with self._frame_lock:
+            rgb = self._latest_disp
+            self._latest_disp = None
+
+        if rgb is not None:
+            img = ImageTk.PhotoImage(Image.fromarray(rgb))
+            cx, cy = self._disp_w // 2, self._disp_h // 2
+            if self._canvas_img_id is None:
+                self._canvas_img_id = self._canvas.create_image(
+                    cx, cy, anchor="center", image=img)
+                self._canvas.itemconfig(self._canvas_txt_id, text="")
+            else:
+                self._canvas.coords(self._canvas_img_id, cx, cy)
+                self._canvas.itemconfig(self._canvas_img_id, image=img)
+            self._canvas.image = img   # prevent GC
+
+        self._schedule_frame()
+
+    def _capture(self) -> None:
+        if self._active is None:
+            return
+        with self._frame_lock:
+            frame = self._latest_raw   # grab full-res BGR from reader thread
+        if frame is None:
+            return
+        session = self._app.v_session.get().strip()
+        out_dir = Path(session) if session else Path("captures")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        ts  = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out = out_dir / f"cam{self._active}_{ts}.png"
+        cv2.imwrite(str(out), frame)
+        self._flash = True
+        self._status.configure(text=f"Saved:\n{out.name}", fg="#81c784")
+        self._app.after(3000, lambda: self._status.configure(text=""))
 
 
 if __name__ == "__main__":

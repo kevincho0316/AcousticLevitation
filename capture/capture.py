@@ -185,18 +185,32 @@ def _read_resolution(path: Path) -> list[int] | None:
 
 # ── Camera listing ────────────────────────────────────────────────────────────
 
+def _v4l2_device_name(idx: int) -> str:
+    name_path = Path(f"/sys/class/video4linux/video{idx}/name")
+    try:
+        return name_path.read_text().strip()
+    except OSError:
+        return ""
+
+
 def list_cameras(max_index: int = 10) -> None:
     print("Probing camera device indices …")
     backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
+    found = False
     for idx in range(max_index):
         cap = cv2.VideoCapture(idx, backend)
         if cap.isOpened():
             w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            print(f"  index {idx}: {w}×{h}")
+            name = _v4l2_device_name(idx)
+            name_str = f"  [{name}]" if name else ""
+            print(f"  index {idx}: {w}×{h}{name_str}")
             cap.release()
+            found = True
         else:
             cap.release()
+    if not found:
+        print("  No cameras found.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────

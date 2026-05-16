@@ -7,29 +7,29 @@ cameras:
     intrinsics_file: calibration/cam_front_intrinsics.yaml
     capture_resolution: [1920, 1080]
     # UVC exposure value (negative = log2 seconds; -6 ≈ 1/64 s)
-    exposure: -2
+    exposure: 156 
     # 0 = manual focus (preferred); set to actual focus value if known
     focus: 0
 
   - id: cam_2
     serial: "DEF456"
     intrinsics_file: calibration/cam_right_intrinsics.yaml
-    capture_resolution: [1920, 1080]
-    exposure: -2
+    capture_resolution: [3024, 4032]
+    exposure: 156 
     focus: 0
 
   - id: cam_3
     serial: "GHI789"
     intrinsics_file: calibration/cam_back_intrinsics.yaml
     capture_resolution: [1920, 1080]
-    exposure: -2
+    exposure: 156 
     focus: 0
 
   - id: cam_4
     serial: "JKL012"
     intrinsics_file: calibration/cam_left_intrinsics.yaml
     capture_resolution: [1920, 1080]
-    exposure: -2
+    exposure: 156 
     focus: 0
 
 # Number of frames to capture per camera per session.
@@ -38,7 +38,7 @@ frames_per_camera: 200
 # Directory index: map serial number → OpenCV device index.
 # Run capture.py --list-cameras to discover indices.
 serial_to_index:
-  ABC123: 0
-  DEF456: 0   #this is only for test purpose so you need to change this part to int value 
-  GHI789: 0 #this is only for test purpose so you need to change this part to int value 
-  JKL012: 0 #this is only for test purpose so you need to change this part to int value 
+  ABC123: 2
+  DEF456: 2   #this is only for test purpose so you need to change this part to int value 
+  GHI789: 2 #this is only for test purpose so you need to change this part to int value 
+  JKL012: 2 #this is only for test purpose so you need to change this part to int value 
