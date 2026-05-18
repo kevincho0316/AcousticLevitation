@@ -62,6 +62,7 @@ from .init_graph import (
     pick_anchor,
 )
 from .init_poses import init_camera_poses
+from .box_fit import apply_box_fit, fit_box_frame_with_labels
 from .io_results import save_3d_plot, save_debug_overlays, write_output_yaml
 
 
@@ -211,39 +212,61 @@ def main() -> None:
         print(f"ERROR: {exc}")
         sys.exit(2)
 
-    # Stats.
+    # Stats (pre-fit reprojection).
     print(f"\n--- Results ---")
     print(f"  Final RMS: {result.final_rms:.3f} px  ({len(result.detection_list)} observations)")
     rms_too_high = result.final_rms > args.max_reproj_px
     if rms_too_high:
         print(f"  WARN: RMS exceeds --max-reproj-px={args.max_reproj_px}.")
 
-    print("\n  Per-marker:")
+    # Phase 6.5: Box-frame fit with face labels from box.yaml.
+    print("\n--- Phase 6.5: Box-frame fit (markers on faces) ---")
+    print("  Using face labels from box.yaml (fixed assignments).")
+
+    face_by_id = {int(m["id"]): m["face"] for m in box_cfg["markers"] if "face" in m}
+    missing_faces = [mid for mid in result.marker_ids if mid not in face_by_id]
+    if missing_faces:
+        print(f"ERROR: box.yaml missing 'face' key for markers: {missing_faces}")
+        sys.exit(2)
+    face_labels = [face_by_id[mid] for mid in result.marker_ids]
+
+    T_align, face_assigns, fit_info = fit_box_frame_with_labels(
+        result.marker_poses,
+        face_labels=face_labels,
+        W_mm=float(dims["width_mm"]),
+        H_mm=float(dims["height_mm"]),
+        D_mm=float(dims["depth_mm"]),
+        marker_side_m=marker_side_m,
+    )
+    apply_box_fit(result, T_align)
+    print(f"  Fit final cost: {fit_info['final_cost']:.3e}")
+    print(f"  Plane residual: rms={fit_info['rms_plane_mm']:.2f} mm  "
+          f"max={fit_info['max_plane_mm']:.2f} mm")
+    print(f"  Normal residual: rms={fit_info['rms_normal_deg']:.2f}°  "
+          f"max={fit_info['max_normal_deg']:.2f}°")
+
+    print("\n  Per-marker (box frame):")
     for i, mid in enumerate(result.marker_ids):
         T = result.marker_poses[i]
-        t = T[:3, 3] * 1000.0  # mm
+        t_mm = T[:3, 3] * 1000.0
         import cv2 as _cv2
         rvec, _ = _cv2.Rodrigues(T[:3, :3])
         r = np.degrees(rvec.ravel())
-        flag = "  (anchor)" if i == result.anchor_idx else ""
-        print(f"    id={mid:2d}: t=[{t[0]:+8.2f},{t[1]:+8.2f},{t[2]:+8.2f}]mm "
+        print(f"    id={mid:2d} [{face_assigns[i]:>6s}]: "
+              f"t=[{t_mm[0]:+8.2f},{t_mm[1]:+8.2f},{t_mm[2]:+8.2f}]mm "
               f"r=[{r[0]:+7.1f},{r[1]:+7.1f},{r[2]:+7.1f}]°  "
+              f"plane={fit_info['plane_resid_mm'][i]:+5.2f}mm  "
+              f"n_resid={fit_info['normal_resid_deg'][i]:.2f}°  "
               f"rms={result.per_marker_rms[i]:.3f}px  "
-              f"n_obs={result.n_obs_per_marker[i]}{flag}")
+              f"n_obs={result.n_obs_per_marker[i]}")
+
+    # Attach face labels + fit info so downstream (YAML write, plot) can use them.
+    result.face_assigns = face_assigns
+    result.fit_info = fit_info
 
     print("\n  Per-image RMS:")
     for cam_idx, (path, _, _) in enumerate(detections):
         print(f"    [{cam_idx:2d}] {path.name}: {result.per_image_rms[cam_idx]:.3f} px")
-
-    # Box-dimension sanity.
-    ref = np.concatenate([
-        (result.marker_poses[i] @ np.hstack([corners_mkr, np.ones((4,1))]).T).T[:, :3]
-        for i in range(result.n_markers)
-    ])
-    bb_mm = (ref.max(axis=0) - ref.min(axis=0)) * 1000.0
-    print(f"\n  Refined marker AABB: {bb_mm[0]:.1f} × {bb_mm[1]:.1f} × {bb_mm[2]:.1f} mm")
-    print(f"  Box dims:            {dims['width_mm']:.1f} × {dims['height_mm']:.1f} × {dims['depth_mm']:.1f} mm")
-    print(f"  (Anchor is at origin; bounding box is rotated/translated relative to box dims.)")
 
     # Output.
     print("\n--- Phase 7: Output ---")
@@ -254,7 +277,14 @@ def main() -> None:
         write_output_yaml(args.box_config, box_cfg, result, marker_side_m, args.output)
 
     if args.debug_dir is not None:
-        save_debug_overlays(detections, result, intrinsics.K, marker_side_m, Path(args.debug_dir))
+        save_debug_overlays(
+            detections,
+            result,
+            intrinsics.K,
+            marker_side_m,
+            box_cfg,
+            Path(args.debug_dir),
+        )
         save_3d_plot(result, box_cfg, marker_side_m, Path(args.debug_dir))
 
     if rms_too_high and not args.force_output:

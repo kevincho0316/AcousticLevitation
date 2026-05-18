@@ -14,7 +14,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 
 import cv2
 from PIL import Image, ImageTk
@@ -32,7 +32,7 @@ class App(tk.Tk):
         self._active_jobs = 0
         self._build_paths()
         self._build_notebook()
-        self._build_log()
+        self._build_status()
 
     # ── Common paths bar ──────────────────────────────────────────────────────
 
@@ -397,45 +397,16 @@ class App(tk.Tk):
 
         return mode_var
 
-    # ── Log area ──────────────────────────────────────────────────────────────
+    # ── Status bar ────────────────────────────────────────────────────────────
 
-    def _build_log(self):
-        lf = ttk.LabelFrame(self, text="Output Log", padding=4)
-        lf.pack(fill="both", expand=True, padx=8, pady=(2, 8))
-
-        self.log = scrolledtext.ScrolledText(
-            lf, height=10, state="disabled",
-            font=("Consolas", 9),
-            background="#1e1e1e", foreground="#d4d4d4",
-            insertbackground="white",
-        )
-        self.log.pack(fill="both", expand=True)
-        self.log.tag_config("hdr", foreground="#9cdcfe")
-        self.log.tag_config("ok",  foreground="#b5cea8")
-        self.log.tag_config("err", foreground="#f48771")
-        self.log.tag_config("warn",foreground="#dcdcaa")
-
-        bottom = ttk.Frame(lf)
-        bottom.pack(fill="x", pady=(4, 0))
-
-        self._status_text = tk.StringVar(value="Idle")
-        ttk.Label(bottom, textvariable=self._status_text,
-                  anchor="w", width=36).pack(side="left", padx=(0, 8))
-        self._progress = ttk.Progressbar(bottom, mode="indeterminate", length=180)
-        self._progress.pack(side="left")
-        ttk.Button(bottom, text="Clear log",
-                   command=self._clear_log).pack(side="right")
-
-    def _log(self, text: str, tag: str = "") -> None:
-        self.log.configure(state="normal")
-        self.log.insert("end", text, tag)
-        self.log.see("end")
-        self.log.configure(state="disabled")
-
-    def _clear_log(self):
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
+    def _build_status(self):
+        bar = ttk.Frame(self, padding=(8, 4))
+        bar.pack(fill="x", padx=8, pady=(2, 8))
+        self._status_text = tk.StringVar(value="Idle — output streams to terminal")
+        ttk.Label(bar, textvariable=self._status_text,
+                  anchor="w").pack(side="left", fill="x", expand=True)
+        self._progress = ttk.Progressbar(bar, mode="indeterminate", length=180)
+        self._progress.pack(side="right")
 
     # ── Progress / status ─────────────────────────────────────────────────────
 
@@ -463,7 +434,8 @@ class App(tk.Tk):
         return True
 
     def _run_command(self, cmd: list[str], header: str) -> None:
-        self._log(f"\n{'─' * 58}\n  {header}\n{'─' * 58}\n", "hdr")
+        sep = "─" * 58
+        print(f"\n{sep}\n  {header}\n{sep}", flush=True)
         self._job_start(header)
 
         def _worker():
@@ -473,32 +445,15 @@ class App(tk.Tk):
                 env["PYTHONIOENCODING"] = "utf-8"
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
+                    stdout=None,
+                    stderr=None,
                     cwd=str(ROOT),
                     env=env,
-                    bufsize=1,
                 )
-                for line in proc.stdout:
-                    lo = line.lower()
-                    if any(w in lo for w in ("error", "fail", "traceback")):
-                        tag = "err"
-                    elif any(w in lo for w in ("warn",)):
-                        tag = "warn"
-                    elif any(w in lo for w in ("pass", "saved", "done", "complete", "accepted")):
-                        tag = "ok"
-                    else:
-                        tag = ""
-                    self.after(0, self._log, line, tag)
                 proc.wait()
-                result = f"\n[Exit {proc.returncode}]\n"
-                self.after(0, self._log, result,
-                           "ok" if proc.returncode == 0 else "err")
+                print(f"[Exit {proc.returncode}]\n", flush=True)
             except Exception as exc:
-                self.after(0, self._log, f"LAUNCH ERROR: {exc}\n", "err")
+                print(f"LAUNCH ERROR: {exc}", flush=True)
             finally:
                 self.after(0, self._job_done)
 
