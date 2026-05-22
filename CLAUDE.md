@@ -1,4 +1,98 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 # Acoustic Levitation Measurement System
+
+## Commands
+
+```bash
+pip install -r requirements.txt          # deps (opencv-contrib-python — must be contrib)
+
+python gui.py                            # Tkinter GUI — every stage as a clickable tab
+python run_pipeline.py --session <dir> --sim-output <path>   # all 5 stages, one command
+
+# Individual stages — each module is a -m entrypoint, run from repo root:
+python -m intrinsic_calibration.calibrate --camera-id <id> --images-dir <dir> ...
+python -m box_calibration.calibrate --images-dir <dir> --intrinsics <yaml> --box-config config/box.yaml --output config/box.yaml
+python -m capture.capture --list-cameras                     # discover device indices
+python -m capture.capture --config config/cameras.yaml --output <session> --n-frames 200
+python -m extrinsic_solver.solve --session <dir> --box-config config/box.yaml --cameras-config config/cameras.yaml --calibration-dir calibration
+python -m ball_detector.detect --session <dir> --cameras-config config/cameras.yaml --calibration-dir calibration
+python -m triangulation.triangulate --session <dir> --cameras-config config/cameras.yaml --calibration-dir calibration
+python -m error_propagation.propagate --session <dir> --box-config config/box.yaml --cameras-config config/cameras.yaml --calibration-dir calibration
+python -m comparison.compare --session <dir> --sim-output <path> --box-config config/box.yaml
+```
+
+Tests (synthetic, no hardware needed):
+
+```bash
+pytest synthetic_tests/tests/                       # all
+pytest synthetic_tests/tests/test_triangulation.py  # one file
+pytest synthetic_tests/tests/test_triangulation.py::test_name   # one test
+```
+
+There is no `pytest.ini`/`setup.py`. `synthetic_tests/tests/conftest.py` inserts the repo
+root onto `sys.path`, so run `pytest` from the repo root. CLI modules also self-insert the
+root via `sys.path.insert`, but `-m` from the root is the reliable invocation.
+
+**Windows**: shell is PowerShell. `python -m capture.capture --list-cameras` uses
+`cv2.CAP_DSHOW`; the Linux sysfs camera-name probes in `gui.py` silently fall back.
+
+## Codebase Layout (as implemented)
+
+The design spec below predates the code; actual layout differs. Each module is a flat
+file, not a subpackage of files:
+
+```
+intrinsic_calibration/calibrate.py   box_calibration/        (calibrate.py + bundle.py,
+capture/capture.py                     faces.py, init_*.py, box_fit.py, io_results.py —
+extrinsic_solver/solve.py              full self-calibration via bundle adjustment)
+ball_detector/detect.py              visualization/scene_3d.py  (3D scene for GUI tab)
+triangulation/triangulate.py         synthetic_tests/synth/   (synthetic scene renderer)
+error_propagation/propagate.py       synthetic_tests/tests/   (the actual test suite)
+comparison/compare.py                gui.py, run_pipeline.py  (orchestrators, repo root)
+common/                              sim.py                   (pre-existing trap simulator)
+```
+
+`debug_*.py` files in several modules are throwaway diagnostics, not pipeline stages.
+
+### Pipeline data flow
+
+`run_pipeline.py` calls each stage's `*_session()` function in-process (not via subprocess;
+`gui.py` instead spawns `-m` subprocesses). Stages communicate through JSON files written
+into the session directory — each stage reads the previous stage's output:
+
+```
+capture        → <session>/<cam_id>/frame_NNNN.png  + metadata
+extrinsic_solver.solve_session       → <session>/extrinsics.json
+ball_detector.detect_session         → <session>/ball_detections.json
+triangulation.triangulate_session    → <session>/triangulation.json
+error_propagation.propagate_session  → <session>/error_budget.json
+comparison.compare_session           → <session>/comparison/
+```
+
+A stage will fail if its input JSON is absent — run stages in order, or use the full pipeline.
+
+### Shared contracts (`common/`)
+
+- `common/__init__.py` — every cross-stage dataclass: `CameraIntrinsics`, `CameraPose`,
+  `BallDetection2D`, `TriangulationResult`, `ErrorSource`/`ErrorBudget`, `ComparisonResult`.
+  Changing a field here ripples through every stage and the JSON files.
+- `common/io_utils.py` — all YAML/JSON IO: `load_box_config`, `load_cameras_config`,
+  `load_intrinsics`, `load_box_to_sim_transform`, numpy-aware JSON encoder.
+- `common/se3_utils.py` — SE(3) Lie algebra (`_se3_log`, `_se3_exp`, `_average_se3`). Camera
+  poses are averaged in the Lie algebra, never as naive matrix means.
+
+### Config coupling
+
+- `config/cameras.yaml` `serial_to_index` maps camera serial → OpenCV device index; the
+  committed values are placeholders (all `2`) and must be set for real captures.
+- `config/box.yaml` is both input and output of `box_calibration.calibrate` — it rewrites
+  `corners_box_frame` (and adds `pose_*`, `reprojection_rms_px`) in place. It also holds
+  `box_to_sim` (4×4), the transform `comparison` needs to put both points in one frame.
+- `comparison` reads `newton_x/y/z` from the simulator's `summary.json` or
+  `final_candidates_*.csv` produced by `sim.py`.
 
 ## Project Overview
 

@@ -141,7 +141,25 @@ def triangulate(
 
         P = _projection_matrix(intr, pose)
         uv = det.center
-        Sigma = det.covariance  # (2,2) covariance of the mean
+        Sigma = det.covariance.copy()  # (2,2) covariance of the mean
+
+        # Inflate 2D weight by pose uncertainty: Σ_eff = Σ_2D + J_pose Σ_pose J_pose^T.
+        if pose.pose_covariance is not None:
+            import cv2 as _cv2
+            K = intr.K.astype(np.float64)
+            R = pose.T_cam_box[:3, :3]
+            t = pose.T_cam_box[:3, 3]
+            rvec_pose, _ = _cv2.Rodrigues(R)
+            tvec_pose = t.copy()
+            # Back-project uv at the camera–box translation distance to get a
+            # representative 3D point for computing the Jacobian.
+            Z_approx = float(np.linalg.norm(t))
+            uv_h = np.linalg.inv(K) @ np.array([uv[0], uv[1], 1.0])
+            X_approx = (R.T @ (Z_approx * uv_h - t)).reshape(1, 3).astype(np.float64)
+            zeros_dist = np.zeros(5, dtype=np.float64)
+            _, jac_pnp = _cv2.projectPoints(X_approx, rvec_pose, tvec_pose, K, zeros_dist)
+            J_pose_2x6 = jac_pnp[0, :, :6].astype(np.float64)  # (2,6) — columns: rvec then tvec
+            Sigma = Sigma + J_pose_2x6 @ pose.pose_covariance @ J_pose_2x6.T
 
         # Regularize to ensure invertibility.
         Sigma_reg = Sigma + np.eye(2) * 1e-6
@@ -180,12 +198,14 @@ def load_poses_json(path: Path) -> dict[str, CameraPose]:
     data = load_json(path)
     poses: dict[str, CameraPose] = {}
     for cam_id, entry in data["poses"].items():
+        pose_cov = entry.get("pose_covariance")
         poses[cam_id] = CameraPose(
             camera_id=cam_id,
             T_cam_box=np.array(entry["T_cam_box"]),
             reprojection_error=entry["reprojection_error_px"],
             n_markers_used=0,
             n_frames_used=entry.get("n_frames_used", 0),
+            pose_covariance=np.array(pose_cov) if pose_cov is not None else None,
         )
     return poses
 

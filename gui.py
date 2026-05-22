@@ -76,6 +76,7 @@ class App(tk.Tk):
         self._tab_triangulate()
         self._tab_error_prop()
         self._tab_compare()
+        self._tab_scene3d()
         self._tab_full_pipeline()
 
     # ── Tab 1: Intrinsic calibration ──────────────────────────────────────────
@@ -313,6 +314,71 @@ class App(tk.Tk):
         ttk.Button(f, text="▶  Run Comparison",
                    command=self._run_compare).grid(row=2, column=0, columnspan=3,
                                                    pady=14, ipadx=10, ipady=4)
+
+    # ── Tab 7b: 3D scene view ────────────────────────────────────────────────
+
+    def _tab_scene3d(self):
+        f = ttk.Frame(self.nb, padding=6)
+        self.nb.add(f, text="🧊 3D View")
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(0, 4))
+        ttk.Button(bar, text="↻  Refresh Scene",
+                   command=self._refresh_scene3d).pack(side="left", padx=2)
+        ttk.Button(bar, text="💾  Save PNG",
+                   command=self._save_scene3d).pack(side="left", padx=2)
+        ttk.Label(bar, text="Drag to rotate · box config + session "
+                            "extrinsics.json / triangulation.json",
+                  foreground="gray").pack(side="left", padx=8)
+
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg, NavigationToolbar2Tk)
+
+        self._scene_fig = Figure(figsize=(7, 5))
+        self._scene_ax = self._scene_fig.add_subplot(111, projection="3d")
+        self._scene_ax.text2D(0.5, 0.5, "Press “Refresh Scene”.",
+                              ha="center", va="center",
+                              transform=self._scene_ax.transAxes,
+                              color="gray")
+        self._scene_canvas = FigureCanvasTkAgg(self._scene_fig, master=f)
+        self._scene_canvas.get_tk_widget().pack(fill="both", expand=True)
+        toolbar = NavigationToolbar2Tk(self._scene_canvas, f, pack_toolbar=False)
+        toolbar.update()
+        toolbar.pack(fill="x")
+
+        # Mouse wheel zooms; left-drag rotates (matplotlib 3D default).
+        from visualization.scene_3d import enable_scroll_zoom
+        enable_scroll_zoom(self._scene_ax)
+        self._scene_canvas.draw()
+
+    def _refresh_scene3d(self):
+        box = self.v_box.get().strip()
+        if not box:
+            messagebox.showerror("Missing path",
+                                 "Set Box config in Common Paths first.")
+            return
+        session = self.v_session.get().strip()
+        try:
+            from visualization.scene_3d import render_scene
+            scene = render_scene(Path(session) if session else None,
+                                 Path(box), self._scene_ax)
+            self._scene_fig.tight_layout()
+            self._scene_canvas.draw()
+            self._status_text.set(
+                f"3D scene: {len(scene['markers'])} markers, "
+                f"{len(scene['cameras'])} cameras, "
+                f"{'ball' if scene['ball'] else 'no ball'}")
+        except Exception as exc:
+            messagebox.showerror("Render error", str(exc))
+
+    def _save_scene3d(self):
+        path = filedialog.asksaveasfilename(
+            initialdir=ROOT, defaultextension=".png",
+            filetypes=[("PNG image", "*.png")])
+        if path:
+            self._scene_fig.savefig(path, dpi=130)
+            self._status_text.set(f"Saved {path}")
 
     # ── Tab 8: Full pipeline ──────────────────────────────────────────────────
 

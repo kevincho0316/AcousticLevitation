@@ -1,0 +1,58 @@
+{
+  "detections": {
+    "cam_1": {
+      "center_uv": [
+        1167.7843947168606,
+        441.90338711262643
+      ],
+      "covariance_uv": [
+        [
+          0.0001,
+          0.0
+        ],
+        [
+          0.0,
+          0.0001
+        ]
+      ],
+      "n_frames_accepted": 1,
+      "n_frames_rejected": 0
+    },
+    "cam_2": {
+      "center_uv": [
+        1168.006968540367,
+        442.74056659572295
+      ],
+      "covariance_uv": [
+        [
+          0.0001,
+          0.0
+        ],
+        [
+          0.0,
+          0.0001
+        ]
+      ],
+      "n_frames_accepted": 1,
+      "n_frames_rejected": 0
+    },
+    "cam_3": {
+      "center_uv": [
+        1175.8680268964847,
+        444.62481655053125
+      ],
+      "covariance_uv": [
+        [
+          0.0001,
+          0.0
+        ],
+        [
+          0.0,
+          0.0001
+        ]
+      ],
+      "n_frames_accepted": 1,
+      "n_frames_rejected": 0
+    }
+  }
+}

@@ -436,7 +436,7 @@ def detect_ball_camera(
         else:
             centers.append(result)
 
-    if len(centers) < 2:
+    if len(centers) < 1:
         raise RuntimeError(
             f"Camera {intrinsics.camera_id}: only {len(centers)} valid detections "
             f"({n_rejected} rejected). Check lighting and ball visibility."

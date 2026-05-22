@@ -1,8 +1,8 @@
 """
 Test error_propagation.propagate against synthetic data.
 
-MC validation: Frobenius ratio of empirical vs analytical total covariance < 0.5
-Budget sources: all 6 sources present and have positive semi-definite covariances
+MC validation: Frobenius ratio of empirical vs analytical triangulation covariance < 0.3
+Budget sources: all 5 sources present and have positive semi-definite covariances
 Total covariance: sum of independent MC sources ≥ triangulation covariance (more uncertainty)
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from synthetic_tests.synth.noise import noisy_ball_detection
 from synthetic_tests.synth.renderer import _project
 from common import BallDetection2D, CameraPose, TriangulationResult
 from triangulation.triangulate import triangulate
-from error_propagation.propagate import propagate_errors, monte_carlo_validate
+from error_propagation.propagate import propagate_errors, mc_validate_triangulation
 
 
 def _build_inputs(scene, sigma_px=0.3, n_frames=100, seed=0):
@@ -36,11 +36,11 @@ def propagation_inputs(default_scene):
     return _build_inputs(default_scene)
 
 
-def test_error_budget_has_six_sources(propagation_inputs, default_scene):
+def test_error_budget_has_five_sources(propagation_inputs, default_scene):
     detections, poses, intrinsics, tri = propagation_inputs
     box_cfg = default_scene.to_box_cfg()
     budget = propagate_errors(tri, poses, intrinsics, detections, box_cfg, n_mc=100, seed=0)
-    assert len(budget.sources) == 6
+    assert len(budget.sources) == 5
 
 
 def test_error_budget_sources_psd(propagation_inputs, default_scene):
@@ -64,17 +64,15 @@ def test_error_budget_total_psd(propagation_inputs, default_scene):
 
 
 def test_mc_validation_frobenius_ratio(propagation_inputs, default_scene):
-    """MC vs analytical Frobenius ratio < 0.5 (500 trials)."""
+    """MC (2D-noise only) vs triangulation covariance Frobenius ratio < 0.3 (500 trials)."""
     detections, poses, intrinsics, tri = propagation_inputs
-    box_cfg = default_scene.to_box_cfg()
-    budget = propagate_errors(tri, poses, intrinsics, detections, box_cfg, n_mc=200, seed=1)
-    mc_result = monte_carlo_validate(
+    mc_result = mc_validate_triangulation(
         intrinsics, poses, detections,
-        tri.position_box, budget.total_covariance,
+        tri.position_box, tri.covariance_box,
         n_mc=500, seed=42,
     )
     ratio = mc_result["frobenius_ratio"]
-    assert ratio < 0.5, f"Frobenius ratio {ratio:.3f} ≥ 0.5 (poor agreement)"
+    assert ratio < 0.3, f"Frobenius ratio {ratio:.3f} ≥ 0.3 (poor agreement)"
 
 
 def test_total_covariance_exceeds_triangulation(propagation_inputs, default_scene):

@@ -106,19 +106,32 @@ def estimate_camera_pose(
         params = cv2.aruco.DetectorParameters()
     except AttributeError:
         params = cv2.aruco.DetectorParameters_create()
+    # Sub-pixel corner refinement: reduces corner noise from ~1 px to ~0.1-0.3 px.
+    try:
+        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        params.cornerRefinementWinSize = 5
+        params.cornerRefinementMinAccuracy = 0.01
+    except AttributeError:
+        pass
 
     K = intrinsics.K.astype(np.float32)
     dist = intrinsics.dist.astype(np.float32)
 
-    accepted_transforms: list[np.ndarray] = []
-    reproj_errors: list[float] = []
+    # Build a marker-id → object-points map from the board config.
+    board_obj_pts = {m["id"]: np.array(m["corners_box_frame_m"], dtype=np.float64)
+                     for m in box_cfg["markers"]}
+
+    pooled_obj: list[np.ndarray] = []
+    pooled_img: list[np.ndarray] = []
+    n_accepted = 0
     n_rejected = 0
 
+    # First pass: collect all corner correspondences from accepted frames.
+    # An initial per-frame pose is used only for reprojection-error gating.
     for path in frame_paths:
         img = cv2.imread(str(path))
         if img is None:
             continue
-        # Undistort before marker detection for maximum corner accuracy.
         img_ud = cv2.undistort(img, K, dist)
         gray = cv2.cvtColor(img_ud, cv2.COLOR_BGR2GRAY)
 
@@ -127,44 +140,71 @@ def estimate_camera_pose(
             n_rejected += 1
             continue
 
-        # Require markers from at least 2 faces for unambiguous pose.
         detected_ids = set(ids.ravel())
         face_set = {m["face"] for m in box_cfg["markers"] if m["id"] in detected_ids}
         if len(face_set) < 2:
             n_rejected += 1
             continue
 
-        # Use undistorted image → pass zero distortion to estimatePoseBoard.
-        n_valid, rvec, tvec = cv2.aruco.estimatePoseBoard(
+        n_valid, rvec_f, tvec_f = cv2.aruco.estimatePoseBoard(
             corners, ids, board, K, np.zeros_like(dist), None, None
         )
         if n_valid == 0:
             n_rejected += 1
             continue
 
-        err = _reprojection_error(corners, ids, rvec, tvec, board, K, np.zeros_like(dist))
+        err = _reprojection_error(corners, ids, rvec_f, tvec_f, board, K, np.zeros_like(dist))
         if err > max_reproj_px:
             n_rejected += 1
             continue
 
-        R, _ = cv2.Rodrigues(rvec)
-        T = np.eye(4)
-        T[:3, :3] = R
-        T[:3, 3] = tvec.ravel()
-        accepted_transforms.append(T)
-        reproj_errors.append(err)
+        # Frame accepted — pool its corners.
+        for c_arr, mid in zip(corners, ids.ravel()):
+            mid = int(mid)
+            if mid in board_obj_pts:
+                pooled_obj.append(board_obj_pts[mid])          # (4, 3)
+                pooled_img.append(c_arr.reshape(4, 2))         # (4, 2)
+        n_accepted += 1
 
-    if not accepted_transforms:
+    if n_accepted == 0:
         raise RuntimeError(
             f"Camera {intrinsics.camera_id}: no valid poses estimated. "
             f"Rejected all {len(frame_paths)} frames (min_markers={min_markers}, max_reproj={max_reproj_px} px). "
             "Check that the box is visible and the box.yaml marker layout is correct."
         )
 
-    T_cam_box = _average_se3(accepted_transforms)
-    mean_reproj = float(np.mean(reproj_errors))
+    all_obj = np.vstack(pooled_obj).astype(np.float64)   # (4·M·F, 3)
+    all_img = np.vstack(pooled_img).astype(np.float64)   # (4·M·F, 2)
+    K_f64 = K.astype(np.float64)
+    zeros_dist = np.zeros(5, dtype=np.float64)
+
+    # Pooled solve: one optimal pose from all corners across all accepted frames.
+    _, rvec, tvec = cv2.solvePnP(
+        all_obj, all_img, K_f64, zeros_dist, flags=cv2.SOLVEPNP_ITERATIVE
+    )
+    cv2.solvePnPRefineLM(all_obj, all_img, K_f64, zeros_dist, rvec, tvec)
+
+    # Reprojection error of the pooled solution.
+    proj, jac = cv2.projectPoints(all_obj, rvec, tvec, K_f64, zeros_dist)
+    residuals = all_img - proj.reshape(-1, 2)
+    mean_reproj = float(np.mean(np.linalg.norm(residuals, axis=1)))
+
+    # 6×6 pose covariance: Σ = σ² · (JᵀJ)⁻¹  (columns 0-5 are rvec/tvec Jacobian).
+    J_pose = jac[:, :6].astype(np.float64)         # (2N, 6)
+    sigma2 = float(np.mean(residuals ** 2))
+    JtJ = J_pose.T @ J_pose
+    try:
+        pose_cov = sigma2 * np.linalg.inv(JtJ)     # (6, 6)
+    except np.linalg.LinAlgError:
+        pose_cov = sigma2 * np.linalg.pinv(JtJ)
+
+    R, _ = cv2.Rodrigues(rvec)
+    T_cam_box = np.eye(4)
+    T_cam_box[:3, :3] = R
+    T_cam_box[:3, 3] = tvec.ravel()
+
     print(
-        f"  {intrinsics.camera_id}: {len(accepted_transforms)} frames used, "
+        f"  {intrinsics.camera_id}: {n_accepted} frames used, "
         f"{n_rejected} rejected, mean reproj = {mean_reproj:.3f} px"
     )
     return CameraPose(
@@ -172,7 +212,8 @@ def estimate_camera_pose(
         T_cam_box=T_cam_box,
         reprojection_error=mean_reproj,
         n_markers_used=min_markers,
-        n_frames_used=len(accepted_transforms),
+        n_frames_used=n_accepted,
+        pose_covariance=pose_cov,
     )
 
 
@@ -205,7 +246,7 @@ def solve_session(
         if not cam_frame_dir.exists():
             print(f"WARN: frame directory not found for {cam_id}. Skipping.")
             continue
-        frame_paths = sorted(cam_frame_dir.glob("frame_*.png"))
+        frame_paths = sorted(cam_frame_dir.glob("*.png"))
         if not frame_paths:
             print(f"WARN: no frames found for {cam_id}. Skipping.")
             continue
@@ -217,11 +258,14 @@ def solve_session(
                 min_markers=min_markers, max_reproj_px=max_reproj_px,
             )
             poses[cam_id] = pose
-            results_json["poses"][cam_id] = {
+            entry: dict = {
                 "T_cam_box": pose.T_cam_box.tolist(),
                 "reprojection_error_px": pose.reprojection_error,
                 "n_frames_used": pose.n_frames_used,
             }
+            if pose.pose_covariance is not None:
+                entry["pose_covariance"] = pose.pose_covariance.tolist()
+            results_json["poses"][cam_id] = entry
         except RuntimeError as exc:
             print(f"ERROR: {exc}")
 

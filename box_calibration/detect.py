@@ -43,6 +43,12 @@ def detect_images(
         det_params = cv2.aruco.DetectorParameters()
     except AttributeError:
         det_params = cv2.aruco.DetectorParameters_create()
+    try:
+        det_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        det_params.cornerRefinementWinSize = 5
+        det_params.cornerRefinementMinAccuracy = 0.01
+    except AttributeError:
+        pass
 
     K_f32 = K.astype(np.float32)
     dist_f32 = dist.astype(np.float32)
