@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2
@@ -13,8 +14,8 @@ from reportlab.pdfgen import canvas
 
 OUT_PDF = Path("aruco_markers_1p5cm_1cm_0p5cm_0p25cm_.pdf")
 DICT_NAME = "DICT_4X4_50"
-MARKER_IDS = list(range(8))
-PAGE_SIZES_MM = [15.0, 10.0, 5.0, 2.5]
+MARKER_IDS = list(range(16))
+PAGE_SIZES_MM = [15.0]
 
 
 def _get_dictionary():
@@ -32,8 +33,8 @@ def _draw_page(c: canvas.Canvas, marker_size_mm: float) -> None:
     margin = 12 * mm
     gap_x = 8 * mm
     gap_y = 8 * mm
-    cols = 2
-    rows = 4
+    cols = 4
+    rows = math.ceil(len(MARKER_IDS) / cols)
 
     cell_w = (page_w - 2 * margin - gap_x) / cols
     cell_h = (page_h - 2 * margin - 12 * mm - gap_y * (rows - 1)) / rows
@@ -41,7 +42,7 @@ def _draw_page(c: canvas.Canvas, marker_size_mm: float) -> None:
     c.setFont("Helvetica-Bold", 12)
     c.drawString(margin, page_h - margin + 2 * mm, f"ArUco {DICT_NAME} - {marker_size_mm:g} mm markers")
     c.setFont("Helvetica", 9)
-    c.drawString(margin, page_h - margin - 3 * mm, "Print at 100% scale. IDs 0-7 from the box config.")
+    c.drawString(margin, page_h - margin - 3 * mm, "Print at 100% scale. IDs 0-15 on this sheet.")
 
     for idx, marker_id in enumerate(MARKER_IDS):
         col = idx % cols

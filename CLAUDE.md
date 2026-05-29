@@ -8,20 +8,43 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 pip install -r requirements.txt          # deps (opencv-contrib-python — must be contrib)
+# Note: requirements.txt has a vestigial `chipwhisperer` entry — safe to ignore/remove.
 
 python gui.py                            # Tkinter GUI — every stage as a clickable tab
-python run_pipeline.py --session <dir> --sim-output <path>   # all 5 stages, one command
+python run_pipeline.py --session <dir> --sim-output <path>   # all stages, one command
+# run_pipeline.py extra flags: --skip-error-propagation, --n-mc 500, --min-markers 3,
+#   --max-reproj-px 2.0, --min-ball-area 50, --max-ball-area 50000, --interactive,
+#   --threshold-mm 2.0, --sim-rank 1
+
+python generate_charuco_sheet.py         # generate DICT_4X4_50 ChArUco PDF for calibration
 
 # Individual stages — each module is a -m entrypoint, run from repo root:
 python -m intrinsic_calibration.calibrate --camera-id <id> --images-dir <dir> ...
-python -m box_calibration.calibrate --images-dir <dir> --intrinsics <yaml> --box-config config/box.yaml --output config/box.yaml
+python -m box_calibration.calibrate \
+    --images-dir <dir> --intrinsics <yaml> \
+    --box-config config/box.yaml --output config/box.yaml \
+    [--anchor-marker-id ID] [--min-markers 2] [--max-reproj-px 1.5] \
+    [--huber-scale 1.0] [--max-initial-reproj-px 40] [--force-output] \
+    [--debug-dir debug/box_cal/]
+python -m box_calibration.show_marker_ids --images-dir <dir> ...   # debug overlay
 python -m capture.capture --list-cameras                     # discover device indices
-python -m capture.capture --config config/cameras.yaml --output <session> --n-frames 200
-python -m extrinsic_solver.solve --session <dir> --box-config config/box.yaml --cameras-config config/cameras.yaml --calibration-dir calibration
-python -m ball_detector.detect --session <dir> --cameras-config config/cameras.yaml --calibration-dir calibration
-python -m triangulation.triangulate --session <dir> --cameras-config config/cameras.yaml --calibration-dir calibration
-python -m error_propagation.propagate --session <dir> --box-config config/box.yaml --cameras-config config/cameras.yaml --calibration-dir calibration
-python -m comparison.compare --session <dir> --sim-output <path> --box-config config/box.yaml
+python -m capture.capture --config config/cameras.yaml --output <session> [--n-frames 200]
+    # --n-frames optional; defaults to frames_per_camera in cameras.yaml (200)
+python -m extrinsic_solver.solve --session <dir> \
+    --box-config config/box.yaml --cameras-config config/cameras.yaml \
+    --calibration-dir calibration \
+    [--min-markers 3] [--max-reproj-px 2.0]
+python -m ball_detector.detect --session <dir> \
+    --cameras-config config/cameras.yaml --calibration-dir calibration \
+    [--min-area 50] [--max-area 50000] [--max-fit-residual 3.0] \
+    [--interactive] [--roi-radius 60] [--background-frame <path>|--subtract-background]
+python -m triangulation.triangulate --session <dir> \
+    --cameras-config config/cameras.yaml --calibration-dir calibration
+python -m error_propagation.propagate --session <dir> \
+    --box-config config/box.yaml --cameras-config config/cameras.yaml \
+    --calibration-dir calibration [--n-mc 500]
+python -m comparison.compare --session <dir> --sim-output <path> \
+    --box-config config/box.yaml [--threshold-mm 2.0] [--sim-rank 1]
 ```
 
 Tests (synthetic, no hardware needed):
@@ -46,13 +69,17 @@ file, not a subpackage of files:
 
 ```
 intrinsic_calibration/calibrate.py   box_calibration/        (calibrate.py + bundle.py,
-capture/capture.py                     faces.py, init_*.py, box_fit.py, io_results.py —
-extrinsic_solver/solve.py              full self-calibration via bundle adjustment)
-ball_detector/detect.py              visualization/scene_3d.py  (3D scene for GUI tab)
-triangulation/triangulate.py         synthetic_tests/synth/   (synthetic scene renderer)
-error_propagation/propagate.py       synthetic_tests/tests/   (the actual test suite)
-comparison/compare.py                gui.py, run_pipeline.py  (orchestrators, repo root)
-common/                              sim.py                   (pre-existing trap simulator)
+capture/capture.py                     faces.py, detect.py, init_graph.py, init_poses.py,
+extrinsic_solver/solve.py              box_fit.py, io_results.py, show_marker_ids.py —
+ball_detector/detect.py                full self-calibration via bundle adjustment)
+triangulation/triangulate.py         visualization/scene_3d.py  (3D scene for GUI tab)
+error_propagation/propagate.py       synthetic_tests/synth/   (cameras.py, noise.py,
+comparison/compare.py                  renderer.py, scene.py — synthetic scene renderer)
+common/                              synthetic_tests/tests/   (the actual test suite)
+generate_charuco_sheet.py            gui.py, run_pipeline.py  (orchestrators, repo root)
+sim.py                               AL/  (Python venv — not source code)
+calibration/  (per-camera YAML intrinsics, per-session config)
+debug_extrinsic/  (throwaway debug image outputs, not pipeline)
 ```
 
 `debug_*.py` files in several modules are throwaway diagnostics, not pipeline stages.
@@ -86,8 +113,11 @@ A stage will fail if its input JSON is absent — run stages in order, or use th
 
 ### Config coupling
 
-- `config/cameras.yaml` `serial_to_index` maps camera serial → OpenCV device index; the
-  committed values are placeholders (all `2`) and must be set for real captures.
+- `config/cameras.yaml` uses `device_index` directly (not serial) — Logitech Brio 100 cameras
+  expose no USB serial number. Current setup: cam_1→/dev/video2 (usb-2.2), cam_2→/dev/video4
+  (usb-2.4), cam_3→/dev/video6 (usb-2.3). `serial_to_index` is intentionally empty `{}`.
+  Exposure is 156 (absolute UVC value, not log2). Run `v4l2-ctl --list-devices` to remap
+  device indices if cameras are reconnected to different USB ports.
 - `config/box.yaml` is both input and output of `box_calibration.calibrate` — it rewrites
   `corners_box_frame` (and adds `pose_*`, `reprojection_rms_px`) in place. It also holds
   `box_to_sim` (4×4), the transform `comparison` needs to put both points in one frame.

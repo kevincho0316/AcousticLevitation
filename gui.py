@@ -683,6 +683,10 @@ class App(tk.Tk):
 _CV_BACKEND = cv2.CAP_V4L2 if sys.platform != "win32" else cv2.CAP_DSHOW
 
 
+def _camera_source(idx: int) -> int:
+    return idx
+
+
 def _cam_device_name(idx: int) -> str:
     try:
         return Path(f"/sys/class/video4linux/video{idx}/name").read_text(
@@ -713,7 +717,7 @@ def _detect_cameras(max_index: int = 10) -> list[int]:
         for i in range(max_index):
             if not _is_capture_device(i):
                 continue
-            cap = cv2.VideoCapture(i, _CV_BACKEND)
+            cap = cv2.VideoCapture(_camera_source(i), _CV_BACKEND)
             if cap.isOpened():
                 ok, _ = cap.read()
                 if ok:
@@ -742,7 +746,7 @@ def _build_index_to_cfg(config_path: str) -> dict[int, dict]:
 
 
 def _open_cap(idx: int) -> cv2.VideoCapture:
-    cap = cv2.VideoCapture(idx, _CV_BACKEND)
+    cap = cv2.VideoCapture(_camera_source(idx), _CV_BACKEND)
     # Buffer=1: always deliver latest frame; prevents burst-drain judder
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     return cap

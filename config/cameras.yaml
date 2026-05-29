@@ -1,44 +1,40 @@
 # Camera configuration for acoustic levitation measurement system.
 # Add one entry per physical camera.
+#
+# Device mapping (from v4l2-ctl --list-devices):
+#   Brio 100 (usb-0000:00:14.0-2.2) → /dev/video2  (device_index: 2)
+#   Brio 100 (usb-0000:00:14.0-2.3) → /dev/video6  (device_index: 6)
+#   Brio 100 (usb-0000:00:14.0-2.4) → /dev/video4  (device_index: 4)
+# These cameras have no USB serial numbers, so device_index is used directly.
 
 cameras:
   - id: cam_1
-    serial: "ABC123"
+    device_index: 2          # Brio 100 on usb-2.2 (/dev/video2)
     intrinsics_file: calibration/cam_front_intrinsics.yaml
     capture_resolution: [1920, 1080]
     # UVC exposure value (negative = log2 seconds; -6 ≈ 1/64 s)
-    exposure: 156 
+    exposure: 156
     # 0 = manual focus (preferred); set to actual focus value if known
     focus: 0
 
   - id: cam_2
-    serial: "DEF456"
+    device_index: 4          # Brio 100 on usb-2.4 (/dev/video4)
     intrinsics_file: calibration/cam_right_intrinsics.yaml
-    capture_resolution: [3024, 4032]
-    exposure: 156 
+    capture_resolution: [1920, 1080]
+    exposure: 156
     focus: 0
 
   - id: cam_3
-    serial: "GHI789"
+    device_index: 6          # Brio 100 on usb-2.3 (/dev/video6)
     intrinsics_file: calibration/cam_back_intrinsics.yaml
     capture_resolution: [1920, 1080]
-    exposure: 156 
+    exposure: 156
     focus: 0
 
-  - id: cam_4
-    serial: "JKL012"
-    intrinsics_file: calibration/cam_left_intrinsics.yaml
-    capture_resolution: [1920, 1080]
-    exposure: 156 
-    focus: 0
 
 # Number of frames to capture per camera per session.
 frames_per_camera: 200
 
-# Directory index: map serial number → OpenCV device index.
-# Run capture.py --list-cameras to discover indices.
-serial_to_index:
-  ABC123: 2
-  DEF456: 2   #this is only for test purpose so you need to change this part to int value 
-  GHI789: 2 #this is only for test purpose so you need to change this part to int value 
-  JKL012: 2 #this is only for test purpose so you need to change this part to int value 
+# serial_to_index is intentionally empty — Brio 100 cameras expose no USB serial.
+# Device assignment is done via device_index fields above.
+serial_to_index: {}
