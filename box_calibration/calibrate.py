@@ -57,10 +57,12 @@ from .detect import detect_images
 from .faces import marker_corners_mkr_frame
 from .init_graph import (
     build_covis_graph,
+    disambiguate_by_nominal,
     init_marker_poses,
     per_marker_ippe,
     pick_anchor,
 )
+from .faces import build_box_model
 from .init_poses import init_camera_poses
 from .box_fit import apply_box_fit, fit_box_frame_with_labels
 from .io_results import save_3d_plot, save_debug_overlays, write_output_yaml
@@ -133,6 +135,20 @@ def main() -> None:
     per_img_cands = per_marker_ippe(detections, intrinsics.K, marker_side_m)
     n_dets = sum(len(d) for d in per_img_cands)
     print(f"  IPPE candidates computed for {n_dets} (image, marker) detections")
+
+    # Phase 2.5: resolve the IPPE square-flip ambiguity per image using the
+    # nominal marker orientations from box.yaml face labels. Without this, the
+    # two near-equal IPPE candidates (ambiguity ratio ~1 for near-frontal flat
+    # markers) get mixed across images by the BFS index, producing a garbage
+    # marker layout and a huge initial bundle reprojection.
+    print("\n--- Phase 2.5: IPPE flip disambiguation (nominal face normals) ---")
+    box_model = build_box_model(box_cfg)
+    nominal_R_by_id = {
+        mid: box_model.nominal_poses[i][:3, :3] for i, mid in enumerate(box_model.ids)
+    }
+    n_amb_before = sum(1 for per in per_img_cands for cl in per.values() if len(cl) > 1)
+    per_img_cands = disambiguate_by_nominal(per_img_cands, nominal_R_by_id)
+    print(f"  Resolved {n_amb_before} ambiguous (image, marker) candidates to a single flip")
 
     # Phase 3: co-visibility + anchor.
     print("\n--- Phase 3: Co-visibility graph + anchor ---")

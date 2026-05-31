@@ -83,6 +83,89 @@ def per_marker_ippe(
     return out
 
 
+# ── IPPE flip disambiguation via nominal face orientations ────────────────────
+
+def _proj_so3(M: np.ndarray) -> np.ndarray:
+    """Nearest rotation matrix to M (Procrustes via SVD)."""
+    U, _, Vt = np.linalg.svd(M)
+    R = U @ Vt
+    if np.linalg.det(R) < 0:
+        U[:, -1] *= -1.0
+        R = U @ Vt
+    return R
+
+
+def disambiguate_by_nominal(
+    per_img_cands: list[dict[int, list[tuple[np.ndarray, float]]]],
+    nominal_R_by_id: dict[int, np.ndarray],
+    n_iter: int = 8,
+) -> list[dict[int, list[tuple[np.ndarray, float]]]]:
+    """Collapse each (image, marker) to a single IPPE candidate using known
+    nominal marker orientations (the box face layout from box.yaml).
+
+    The IPPE square ambiguity gives two pose candidates per marker that differ
+    by a ~180° out-of-plane flip. The two candidates' surface normals point in
+    different directions, so the correct flip is the one whose normal agrees
+    with the marker's nominal face normal — after mapping it through the (single)
+    camera rotation for that image.
+
+    Per image we jointly estimate one camera rotation R_cam_box and pick, for
+    each marker, the candidate whose normal best matches R_cam_box @ n_nominal.
+    R_cam_box is seeded from the most-confident marker (largest IPPE ambiguity
+    ratio) and refined by rotation averaging. This anchors flips to the nominal
+    box frame, so the chosen physical flip is consistent across all images —
+    which a purely relative (cross-marker) score cannot guarantee.
+
+    Markers absent from nominal_R_by_id keep their best-reprojection candidate.
+    """
+    out: list[dict[int, list[tuple[np.ndarray, float]]]] = []
+    for per in per_img_cands:
+        ids = [m for m in per if m in nominal_R_by_id]
+        if not ids:
+            out.append({m: [per[m][0]] for m in per})
+            continue
+
+        def _ratio(m: int) -> float:
+            cl = per[m]
+            return cl[1][1] / max(cl[0][1], 1e-9) if len(cl) > 1 else 1e9
+
+        ref = max(ids, key=_ratio)
+        # Seed camera rotation from the reference marker's best candidate.
+        R_cam_box = per[ref][0][0][:3, :3] @ nominal_R_by_id[ref].T
+
+        flips: dict[int, int] = {}
+        for _ in range(n_iter):
+            new_flips: dict[int, int] = {}
+            for m in ids:
+                cl = per[m]
+                if len(cl) == 1:
+                    new_flips[m] = 0
+                    continue
+                target_n = R_cam_box @ nominal_R_by_id[m][:, 2]
+                # Pick candidate whose marker normal (z-axis in cam frame) is
+                # closest to the nominally expected normal direction.
+                best = max(
+                    range(len(cl)),
+                    key=lambda i: float(cl[i][0][:3, 2] @ target_n),
+                )
+                new_flips[m] = best
+            # Refine R_cam_box by averaging R_cam_marker @ R_nom_marker^T.
+            M = np.zeros((3, 3))
+            for m in ids:
+                M += per[m][new_flips[m]][0][:3, :3] @ nominal_R_by_id[m].T
+            R_cam_box = _proj_so3(M)
+            if new_flips == flips:
+                break
+            flips = new_flips
+
+        chosen: dict[int, list[tuple[np.ndarray, float]]] = {}
+        for m in per:
+            idx = flips.get(m, 0)
+            chosen[m] = [per[m][idx]]
+        out.append(chosen)
+    return out
+
+
 # ── Co-visibility graph ───────────────────────────────────────────────────────
 
 def build_covis_graph(
