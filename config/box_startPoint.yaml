@@ -1,0 +1,71 @@
+box_dimensions:
+  width_mm: 100.0
+  height_mm: 40.0
+  depth_mm: 100.0
+aruco_dictionary: DICT_4X4_50
+marker_side_mm: 15.0
+markers:
+- id: 0
+  face: front
+  center_box_mm: [12.5, 12.5, 0.0]
+- id: 1
+  face: front
+  center_box_mm: [50.0, 20.0, 0.0]
+- id: 2
+  face: front
+  center_box_mm: [87.5, 27.5, 0.0]
+- id: 3
+  face: right
+  center_box_mm: [100.0, 12.5, 12.5]
+- id: 4
+  face: right
+  center_box_mm: [100.0, 20.0, 50.0]
+- id: 5
+  face: right
+  center_box_mm: [100.0, 27.5, 87.5]
+- id: 6
+  face: back
+  center_box_mm: [87.5, 12.5, 100.0]
+- id: 7
+  face: back
+  center_box_mm: [50.0, 20.0, 100.0]
+- id: 8
+  face: back
+  center_box_mm: [12.5, 27.5, 100.0]
+- id: 9
+  face: left
+  center_box_mm: [0.0, 12.5, 87.5]
+- id: 10
+  face: left
+  center_box_mm: [0.0, 20.0, 50.0]
+- id: 11
+  face: left
+  center_box_mm: [0.0, 27.5, 12.5]
+- id: 12
+  face: top
+  center_box_mm: [92.5, 40.0, 7.5]
+- id: 13
+  face: top
+  center_box_mm: [92.5, 40.0, 92.5]
+- id: 14
+  face: top
+  center_box_mm: [7.5, 40.0, 92.5]
+- id: 15
+  face: top
+  center_box_mm: [7.5, 40.0, 7.5]
+marker_position_uncertainty_mm: 2.0
+box_to_sim:
+  translation_m:
+  - 0.0
+  - 0.0
+  - 0.0
+  rotation_matrix:
+  - - 1.0
+    - 0.0
+    - 0.0
+  - - 0.0
+    - 1.0
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 1.0

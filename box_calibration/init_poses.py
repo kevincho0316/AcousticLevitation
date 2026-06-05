@@ -67,7 +67,7 @@ def init_camera_poses(
     print(f"  Init poses: {n_ok}/{len(detections)} succeeded")
     if n_ok == 0:
         raise RuntimeError(
-            "All solvePnP calls failed. Check that corners_box_frame in box.yaml "
+            "All solvePnP calls failed. Check that corners_box_frame in the box config "
             "is a reasonable initial estimate and marker IDs match."
         )
     return poses

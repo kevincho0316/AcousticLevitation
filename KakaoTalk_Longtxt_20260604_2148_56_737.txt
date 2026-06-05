@@ -1,0 +1,27 @@
+box_startPoint reference
+=======================
+
+Use this layout as the seed input for `config/box_startPoint.yaml`.
+After running box calibration, the refined output should go to
+`config/box.config.yaml`.
+
+id 0   front  [12.5, 12.5, 0.0]
+id 1   front  [50.0, 20.0, 0.0]      inferred
+id 2   front  [87.5, 27.5, 0.0]
+
+id 3   right  [100.0, 12.5, 12.5]
+id 4   right  [100.0, 20.0, 50.0]    inferred
+id 5   right  [100.0, 27.5, 87.5]
+
+id 6   back   [87.5, 12.5, 100.0]
+id 7   back   [50.0, 20.0, 100.0]    inferred
+id 8   back   [12.5, 27.5, 100.0]
+
+id 9   left   [0.0, 12.5, 87.5]
+id 10  left   [0.0, 20.0, 50.0]      inferred
+id 11  left   [0.0, 27.5, 12.5]
+
+id 12  top    [92.5, 40.0, 7.5]
+id 13  top    [92.5, 40.0, 92.5]
+id 14  top    [7.5, 40.0, 92.5]
+id 15  top    [7.5, 40.0, 7.5]

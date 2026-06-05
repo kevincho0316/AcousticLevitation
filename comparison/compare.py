@@ -3,7 +3,7 @@ Compare the measured 3D ball position against the simulator's predicted trap.
 
 Both positions are expressed in the box coordinate frame for comparison.
 The simulator output is transformed from the simulator frame to the box frame
-using the box_to_sim transform (inverted) from box.yaml.
+using the box_to_sim transform (inverted) from the box config.
 
 Outputs:
   - Offset vector (measured − simulated) in box frame (mm)
@@ -16,7 +16,7 @@ Usage:
     python -m comparison.compare \\
         --session sessions/session_001 \\
         --sim-output simulation_outputs/hardware_trap_runs/attempt_004/summary.json \\
-        --box-config config/box.yaml \\
+        --box-config config/box.config.yaml \\
         --output sessions/session_001/comparison/ \\
         [--threshold-mm 2.0] [--sim-rank 1]
 """
@@ -37,6 +37,7 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import ComparisonResult
 from common.io_utils import (
+    default_box_config_path,
     load_box_config, load_box_to_sim_transform, load_json, save_json,
 )
 
@@ -300,7 +301,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--session", type=Path, required=True)
     p.add_argument("--sim-output", type=Path, required=True,
                    help="Path to summary.json or final_candidates_*.csv from sim.py")
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--output", type=Path, default=None)
     p.add_argument("--threshold-mm", type=float, default=2.0)
     p.add_argument("--sim-rank", type=int, default=1,

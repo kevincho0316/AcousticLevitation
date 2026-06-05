@@ -10,7 +10,7 @@ Renders, per frame, what estimatePoseBoard sees and produces:
     and whether the frame would pass the solver's accept/reject gates
 
 Use this when a camera reports "no valid poses estimated" or a suspicious
-reprojection error: it shows whether markers are missing, the box.yaml
+reprojection error: it shows whether markers are missing, the box config
 layout is wrong, or the pose itself is bad.
 
 Usage:
@@ -18,7 +18,7 @@ Usage:
     python -m extrinsic_solver.debug_solve \\
         --image sessions/session_001/cam_left/frame_0000.png \\
         --intrinsics calibration/cam_left_intrinsics.yaml \\
-        --box-config config/box.yaml \\
+        --box-config config/box.config.yaml \\
         --output debug_extrinsic/
 
     # one representative frame per camera in a session
@@ -26,7 +26,7 @@ Usage:
         --session sessions/session_001 \\
         --cameras-config config/cameras.yaml \\
         --calibration-dir calibration/ \\
-        --box-config config/box.yaml \\
+        --box-config config/box.config.yaml \\
         --output debug_extrinsic/
 """
 
@@ -41,7 +41,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CameraIntrinsics
-from common.io_utils import load_box_config, load_cameras_config, load_intrinsics
+from common.io_utils import default_box_config_path, load_box_config, load_cameras_config, load_intrinsics
 from extrinsic_solver.solve import _build_board, _detect_markers
 
 # ── colours (BGR) ─────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ def main() -> None:
     p.add_argument("--session", type=Path, help="session dir (per-camera mode)")
     p.add_argument("--cameras-config", type=Path, default=Path("config/cameras.yaml"))
     p.add_argument("--calibration-dir", type=Path, default=Path("calibration"))
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--output", type=Path, default=Path("debug_extrinsic"))
     p.add_argument("--min-markers", type=int, default=3)
     p.add_argument("--max-reproj-px", type=float, default=2.0)

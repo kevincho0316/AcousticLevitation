@@ -101,7 +101,7 @@ def disambiguate_by_nominal(
     n_iter: int = 8,
 ) -> list[dict[int, list[tuple[np.ndarray, float]]]]:
     """Collapse each (image, marker) to a single IPPE candidate using known
-    nominal marker orientations (the box face layout from box.yaml).
+    nominal marker orientations (the box face layout from the box config).
 
     The IPPE square ambiguity gives two pose candidates per marker that differ
     by a ~180° out-of-plane flip. The two candidates' surface normals point in

@@ -22,7 +22,7 @@ python generate_charuco_sheet.py         # generate DICT_4X4_50 ChArUco PDF for 
 python -m intrinsic_calibration.calibrate --camera-id <id> --images-dir <dir> ...
 python -m box_calibration.calibrate \
     --images-dir <dir> --intrinsics <yaml> \
-    --box-config config/box.yaml --output config/box.yaml \
+    --box-config config/box_startPoint.yaml --output config/box.config.yaml \
     [--anchor-marker-id ID] [--min-markers 2] [--max-reproj-px 1.5] \
     [--huber-scale 1.0] [--max-initial-reproj-px 40] [--force-output] \
     [--debug-dir debug/box_cal/]
@@ -31,7 +31,7 @@ python -m capture.capture --list-cameras                     # discover device i
 python -m capture.capture --config config/cameras.yaml --output <session> [--n-frames 200]
     # --n-frames optional; defaults to frames_per_camera in cameras.yaml (200)
 python -m extrinsic_solver.solve --session <dir> \
-    --box-config config/box.yaml --cameras-config config/cameras.yaml \
+    --box-config config/box.config.yaml --cameras-config config/cameras.yaml \
     --calibration-dir calibration \
     [--min-markers 3] [--max-reproj-px 2.0]
 python -m ball_detector.detect --session <dir> \
@@ -41,10 +41,10 @@ python -m ball_detector.detect --session <dir> \
 python -m triangulation.triangulate --session <dir> \
     --cameras-config config/cameras.yaml --calibration-dir calibration
 python -m error_propagation.propagate --session <dir> \
-    --box-config config/box.yaml --cameras-config config/cameras.yaml \
+    --box-config config/box.config.yaml --cameras-config config/cameras.yaml \
     --calibration-dir calibration [--n-mc 500]
 python -m comparison.compare --session <dir> --sim-output <path> \
-    --box-config config/box.yaml [--threshold-mm 2.0] [--sim-rank 1]
+    --box-config config/box.config.yaml [--threshold-mm 2.0] [--sim-rank 1]
 ```
 
 Tests (synthetic, no hardware needed):
@@ -118,8 +118,9 @@ A stage will fail if its input JSON is absent — run stages in order, or use th
   (usb-2.4), cam_3→/dev/video6 (usb-2.3). `serial_to_index` is intentionally empty `{}`.
   Exposure is 156 (absolute UVC value, not log2). Run `v4l2-ctl --list-devices` to remap
   device indices if cameras are reconnected to different USB ports.
-- `config/box.yaml` is both input and output of `box_calibration.calibrate` — it rewrites
-  `corners_box_frame` (and adds `pose_*`, `reprojection_rms_px`) in place. It also holds
+- `config/box_startPoint.yaml` is the seed input to `box_calibration.calibrate`; the
+  calibrated output is `config/box.config.yaml`, which rewrites `corners_box_frame`
+  (and adds `pose_*`, `reprojection_rms_px`) in place. It also holds
   `box_to_sim` (4×4), the transform `comparison` needs to put both points in one frame.
 - `comparison` reads `newton_x/y/z` from the simulator's `summary.json` or
   `final_candidates_*.csv` produced by `sim.py`.
@@ -350,7 +351,7 @@ Avoid cameras with strong fisheye distortion or built-in image processing that c
 
 ## Configuration Files
 
-### `config/box.yaml`
+### `config/box_startPoint.yaml` / `config/box.config.yaml`
 ```yaml
 box_dimensions: [width_mm, depth_mm, height_mm]
 markers:
@@ -380,7 +381,7 @@ cameras:
 ## Workflow
 
 1. **One-time per camera**: run intrinsic calibration with ChArUco board → save profile
-2. **Box construction**: build box, attach markers, measure marker positions → save `box.yaml`
+2. **Box construction**: build box, attach markers, measure marker positions → save `box_startPoint.yaml`
    - Optional: run self-calibration to refine marker positions
 3. **Per experiment session**:
    1. Position cameras around box, lock focus/exposure

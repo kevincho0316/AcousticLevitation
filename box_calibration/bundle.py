@@ -279,6 +279,8 @@ def run_bundle_adjustment(
             "co-visibility graph init produced sensible relative poses."
         )
 
+    ba_nfev = [0]   # cumulative evaluations across all BA passes (for the GUI graph)
+
     def _solve(x_start, dl, label: str):
         args_l = _make_args(dl)
         sp = _build_sparsity(n_cams, n_markers, anchor_idx, dl)
@@ -294,10 +296,15 @@ def run_bundle_adjustment(
 
         def _tracked(x, *a):
             r = _residuals(x, *a)
+            rms = float(np.sqrt(np.mean(r[:n_reproj] ** 2)))
             if pbar is not None:
                 pbar.update(1)
-                pbar.set_postfix(rms=f"{np.sqrt(np.mean(r[:n_reproj]**2)):.3f}px",
-                                 refresh=False)
+                pbar.set_postfix(rms=f"{rms:.3f}px", refresh=False)
+            ba_nfev[0] += 1
+            # Throttled machine-readable trace for the GUI live RMS graph:
+            # "RMS-track <cumulative_nfev> <rms>".
+            if ba_nfev[0] % 20 == 0:
+                print(f"  RMS-track {ba_nfev[0]} {rms:.4f}", flush=True)
             return r
 
         try:

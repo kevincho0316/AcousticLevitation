@@ -23,7 +23,7 @@ Two independent Monte Carlo validations are run:
 Usage:
     python -m error_propagation.propagate \\
         --session sessions/session_001 \\
-        --box-config config/box.yaml \\
+        --box-config config/box.config.yaml \\
         --cameras-config config/cameras.yaml \\
         --calibration-dir calibration/ \\
         --output sessions/session_001/error_budget.json \\
@@ -44,6 +44,7 @@ from common import (
     ErrorBudget, ErrorSource, TriangulationResult,
 )
 from common.io_utils import (
+    default_box_config_path,
     load_box_config, load_cameras_config, load_intrinsics, load_json, save_json,
 )
 from common.se3_utils import _se3_exp
@@ -502,7 +503,7 @@ def propagate_session(
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Error propagation and uncertainty quantification")
     p.add_argument("--session", type=Path, required=True)
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--cameras-config", type=Path, default=Path("config/cameras.yaml"))
     p.add_argument("--calibration-dir", type=Path, default=Path("calibration"))
     p.add_argument("--output", type=Path, default=None)

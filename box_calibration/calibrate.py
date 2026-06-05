@@ -1,6 +1,6 @@
 """Full self-calibration of box marker layout via bundle adjustment.
 
-Trusts ONLY from box.yaml:
+Trusts ONLY from the seed box config:
   - box_dimensions (informational, used for viz)
   - marker_side_mm (fixes metric scale per marker)
   - marker IDs (which IDs to expect)
@@ -24,8 +24,8 @@ Usage:
     python -m box_calibration.calibrate \\
         --images-dir  data/box_calib/ \\
         --intrinsics  calibration/cam_front_intrinsics.yaml \\
-        --box-config  config/box.yaml \\
-        --output      config/box.yaml \\
+        --box-config  config/box_startPoint.yaml \\
+        --output      config/box.config.yaml \\
         [--anchor-marker-id ID] \\
         [--min-markers 2] \\
         [--max-reproj-px 1.5] \\
@@ -50,7 +50,12 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-from common.io_utils import load_box_config, load_intrinsics
+from common.io_utils import (
+    box_calibrated_config_path,
+    default_box_startpoint_path,
+    load_box_config,
+    load_intrinsics,
+)
 
 from .bundle import run_bundle_adjustment
 from .detect import detect_images
@@ -64,7 +69,12 @@ from .init_graph import (
 )
 from .faces import build_box_model
 from .init_poses import init_camera_poses
-from .box_fit import apply_box_fit, fit_box_frame_with_labels
+from .box_fit import (
+    _face_specs,
+    apply_box_fit,
+    fit_box_frame,
+    resolve_marker_flips,
+)
 from .io_results import save_3d_plot, save_debug_overlays, write_output_yaml
 
 
@@ -75,8 +85,8 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--images-dir",        type=Path, required=True)
     p.add_argument("--intrinsics",         type=Path, required=True)
-    p.add_argument("--box-config",         type=Path, default=Path("config/box.yaml"))
-    p.add_argument("--output",             type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config",         type=Path, default=default_box_startpoint_path())
+    p.add_argument("--output",             type=Path, default=box_calibrated_config_path())
     p.add_argument("--anchor-marker-id",   type=int,   default=None,
                    help="Marker ID to pin at box-frame origin. "
                         "Default: marker with most observations.")
@@ -97,11 +107,15 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    print(f"  Seed config: {args.box_config}")
+    print(f"  Output config: {args.output}")
 
     image_paths_by_key: dict[str, Path] = {}
     for ext in ("*.jpg", "*.jpeg", "*.png", "*.bmp",
                 "*.JPG", "*.JPEG", "*.PNG", "*.BMP"):
         for p in args.images_dir.glob(ext):
+            if p.stem.startswith("debug_"):
+                continue
             image_paths_by_key.setdefault(str(p.resolve()).casefold(), p)
     image_paths = sorted(image_paths_by_key.values())
     if not image_paths:
@@ -128,6 +142,7 @@ def main() -> None:
         aruco_dict_name=box_cfg.get("aruco_dictionary", "DICT_4X4_50"),
         valid_ids=set(marker_ids),
         min_markers=args.min_markers,
+        debug_dir=Path(args.debug_dir) if args.debug_dir is not None else None,
     )
 
     # Phase 2: per-marker IPPE candidates.
@@ -137,7 +152,7 @@ def main() -> None:
     print(f"  IPPE candidates computed for {n_dets} (image, marker) detections")
 
     # Phase 2.5: resolve the IPPE square-flip ambiguity per image using the
-    # nominal marker orientations from box.yaml face labels. Without this, the
+    # nominal marker orientations from the seed box config face labels. Without this, the
     # two near-equal IPPE candidates (ambiguity ratio ~1 for near-frontal flat
     # markers) get mixed across images by the BFS index, producing a garbage
     # marker layout and a huge initial bundle reprojection.
@@ -235,26 +250,63 @@ def main() -> None:
     if rms_too_high:
         print(f"  WARN: RMS exceeds --max-reproj-px={args.max_reproj_px}.")
 
-    # Phase 6.5: Box-frame fit with face labels from box.yaml.
+    # Phase 6.5: Box-frame fit — pure geometric best fit.
     print("\n--- Phase 6.5: Box-frame fit (markers on faces) ---")
-    print("  Using face labels from box.yaml (fixed assignments).")
+    print("  Plane-distance only: faces inferred from geometry, normals/labels ignored.")
 
-    face_by_id = {int(m["id"]): m["face"] for m in box_cfg["markers"] if "face" in m}
-    missing_faces = [mid for mid in result.marker_ids if mid not in face_by_id]
-    if missing_faces:
-        print(f"ERROR: box.yaml missing 'face' key for markers: {missing_faces}")
-        sys.exit(2)
-    face_labels = [face_by_id[mid] for mid in result.marker_ids]
+    # Confidence weight per marker: more observations + lower BA reprojection error
+    # → higher trust. Under-observed markers (e.g. a side marker seen once) get
+    # downweighted so they cannot drag the global box-frame alignment.
+    conf = result.n_obs_per_marker / (result.per_marker_rms + 1.0)
+    med = float(np.median(conf)) if np.any(conf > 0) else 1.0
+    fit_weights = np.clip(conf / max(med, 1e-9), 0.1, 10.0)
+    low = [mid for mid, w in zip(result.marker_ids, fit_weights) if w < 0.5]
+    if low:
+        print(f"  Downweighted (sparse/noisy) markers in box fit: {low}")
 
-    T_align, face_assigns, fit_info = fit_box_frame_with_labels(
+    T_align, face_assigns, fit_info = fit_box_frame(
         result.marker_poses,
-        face_labels=face_labels,
         W_mm=float(dims["width_mm"]),
         H_mm=float(dims["height_mm"]),
         D_mm=float(dims["depth_mm"]),
         marker_side_m=marker_side_m,
+        weights=fit_weights,
+        use_normals=False,
     )
     apply_box_fit(result, T_align)
+
+    # Cross-check inferred faces against the config labels (if present): a mismatch
+    # is a useful signal (wrong paste face, or a degenerate/flipped global fit).
+    face_by_id = {int(m["id"]): m["face"] for m in box_cfg["markers"] if "face" in m}
+    if face_by_id:
+        mism = [(mid, face_by_id[mid], face_assigns[i])
+                for i, mid in enumerate(result.marker_ids)
+                if mid in face_by_id and face_by_id[mid] != face_assigns[i]]
+        if mism:
+            print("  WARN: inferred face ≠ config face for: "
+                  + ", ".join(f"{mid}({cfg}→{inf})" for mid, cfg, inf in mism))
+
+    # Resolve per-marker 180° flips left in the BA cloud: a flat marker's +Z must
+    # equal its outward face normal. The plane fit (orientation-agnostic) cannot fix
+    # these, so pick each flipped marker's correct twist by multi-view reprojection.
+    # Outward normals come from the *inferred* face assignment, not config labels.
+    W = float(dims["width_mm"]); H = float(dims["height_mm"]); D = float(dims["depth_mm"])
+    spec_axis_sign = {n: (ax, sg) for n, ax, sg, _ in _face_specs(W / 1000, H / 1000, D / 1000)}
+    outward_normals = np.zeros((len(result.marker_ids), 3))
+    for i in range(len(result.marker_ids)):
+        ax, sg = spec_axis_sign[face_assigns[i]]
+        outward_normals[i, ax] = sg
+
+    flipped = resolve_marker_flips(result, outward_normals, intrinsics.K, marker_side_m)
+    if flipped:
+        print(f"  Flip-corrected markers (+Z → outward face normal): {flipped}")
+        normals_now = result.marker_poses[:, :3, 2]
+        cosr = np.clip(np.einsum("ij,ij->i", normals_now, outward_normals), -1.0, 1.0)
+        ang = np.degrees(np.arccos(cosr))
+        fit_info["normal_resid_deg"] = ang
+        fit_info["rms_normal_deg"] = float(np.sqrt(np.mean(ang ** 2)))
+        fit_info["max_normal_deg"] = float(np.max(ang))
+
     print(f"  Fit final cost: {fit_info['final_cost']:.3e}")
     print(f"  Plane residual: rms={fit_info['rms_plane_mm']:.2f} mm  "
           f"max={fit_info['max_plane_mm']:.2f} mm")

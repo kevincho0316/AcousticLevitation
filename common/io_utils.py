@@ -31,6 +31,49 @@ def save_yaml(data: dict, path: str | Path) -> None:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 
+def box_startpoint_config_path() -> Path:
+    """Default seed box config before calibration."""
+    return Path("config/box_startPoint.yaml")
+
+
+def box_calibrated_config_path() -> Path:
+    """Default calibrated box config written by box calibration."""
+    return Path("config/box.config.yaml")
+
+
+def legacy_box_config_path() -> Path:
+    """Legacy single-file box config path kept for backward compatibility."""
+    return Path("config/box.yaml")
+
+
+def default_box_config_path() -> Path:
+    """Best box config to read for downstream tools.
+
+    Prefer the calibrated output, then the seed config, then the legacy
+    single-file name if that's all that exists.
+    """
+    for candidate in (
+        box_calibrated_config_path(),
+        box_startpoint_config_path(),
+        legacy_box_config_path(),
+    ):
+        if candidate.exists():
+            return candidate
+    return box_calibrated_config_path()
+
+
+def default_box_startpoint_path() -> Path:
+    """Best seed config to use as box-calibration input."""
+    for candidate in (
+        box_startpoint_config_path(),
+        legacy_box_config_path(),
+        box_calibrated_config_path(),
+    ):
+        if candidate.exists():
+            return candidate
+    return box_startpoint_config_path()
+
+
 # ── Camera intrinsics ─────────────────────────────────────────────────────────
 
 def save_intrinsics(intr: CameraIntrinsics, path: str | Path) -> None:
@@ -134,7 +177,7 @@ def _marker_corners_m(marker: dict, W: float, D: float, H: float, s: float) -> n
 # ── Box configuration ─────────────────────────────────────────────────────────
 
 def load_box_config(path: str | Path) -> dict:
-    """Load box.yaml and resolve marker corners (auto or explicit) → meters."""
+    """Load the box config and resolve marker corners (auto or explicit) → meters."""
     cfg = load_yaml(path)
 
     dims = cfg["box_dimensions"]

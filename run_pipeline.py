@@ -15,7 +15,7 @@ Usage:
     python run_pipeline.py \\
         --session sessions/session_001 \\
         --sim-output simulation_outputs/hardware_trap_runs/attempt_004/summary.json \\
-        [--box-config config/box.yaml] \\
+        [--box-config config/box.config.yaml] \\
         [--cameras-config config/cameras.yaml] \\
         [--calibration-dir calibration] \\
         [--threshold-mm 2.0] \\
@@ -26,7 +26,7 @@ Usage:
 Prerequisites:
   - Intrinsic calibration files must exist in --calibration-dir.
   - Frames must be captured to --session/<camera_id>/frame_NNNN.png.
-  - box.yaml and cameras.yaml must be configured.
+  - box_startPoint.yaml (seed) or box.config.yaml (calibrated) and cameras.yaml must be configured.
 """
 
 from __future__ import annotations
@@ -35,6 +35,8 @@ import argparse
 import sys
 import time
 from pathlib import Path
+
+from common.io_utils import default_box_config_path
 
 
 def _parse_args() -> argparse.Namespace:
@@ -46,7 +48,7 @@ def _parse_args() -> argparse.Namespace:
                    help="Session directory containing per-camera frame subdirectories")
     p.add_argument("--sim-output", type=Path, required=True,
                    help="Simulator output: summary.json or final_candidates_*.csv from sim.py")
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--cameras-config", type=Path, default=Path("config/cameras.yaml"))
     p.add_argument("--calibration-dir", type=Path, default=Path("calibration"))
     p.add_argument("--threshold-mm", type=float, default=2.0,

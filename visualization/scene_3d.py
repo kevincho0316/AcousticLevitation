@@ -10,7 +10,7 @@ Data sources (all optional — whatever is present gets drawn):
 Usage (standalone window):
     python -m visualization.scene_3d \\
         --session session/session_1 \\
-        --box-config config/box.yaml
+        --box-config config/box.config.yaml
 
 The GUI imports `render_scene` to draw into an embedded matplotlib canvas.
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from common.io_utils import load_box_config, load_json
+from common.io_utils import default_box_config_path, load_box_config, load_json
 
 M_TO_MM = 1000.0
 
@@ -55,7 +55,7 @@ def load_scene(session_dir: Path | None, box_config_path: Path) -> dict:
     box_cfg = load_box_config(box_config_path)
     scene: dict = {"markers": [], "cameras": [], "ball": None, "box_dims": None}
 
-    # Box frame axes: X = width, Y = height, Z = depth (matches box.yaml
+    # Box frame axes: X = width, Y = height, Z = depth (matches the box config
     # marker coords — left/right faces on X, top/bottom on Y, front/back on Z).
     dims = box_cfg.get("box_dimensions")
     if isinstance(dims, dict):
@@ -290,7 +290,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description="3D scene plot (box, markers, cameras, ball)")
     p.add_argument("--session", type=Path, default=None,
                    help="session dir holding extrinsics.json / triangulation.json")
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--save", type=Path, default=None,
                    help="save PNG instead of opening a window")
     args = p.parse_args()

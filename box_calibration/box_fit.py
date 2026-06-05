@@ -35,18 +35,22 @@ from .faces import marker_corners_mkr_frame
 
 
 # (face_name, axis_index, marker_normal_sign_in_box_frame, plane_offset_along_axis)
-# Plane equation: x[axis] = off. Marker +Z (third col of T_box_mk's rotation) is
-# expected to point along `sign * e_axis` in the box frame for that face.
-# Sign convention matches faces.FACE_TABLE: front/back use +Z/−Z (into box),
-# others use outward face normal.
+# Plane equation: x[axis] = off. `sign` = the OUTWARD face normal (physical ArUco
+# +Z, always toward the camera) as a direction along `axis` in the box frame.
+# OpenGL-style convention: the front face sits at z=0 with outward normal −Z (toward
+# a camera at z<0); back sits at z=D with outward normal +Z. The normal term in
+# _fit_fixed_faces pulls each marker's +Z onto sign*e_axis, resolving the 180° flip
+# ambiguity that a plane-distance-only objective is blind to.
+# NOTE: faces.FACE_TABLE seeds front/back the opposite way (into-box) to keep
+# BFS/disambiguation init stable; BA converges to this outward truth regardless.
 def _face_specs(W: float, H: float, D: float) -> list[tuple[str, int, float, float]]:
     return [
         ("right",  0, +1.0, W),
         ("left",   0, -1.0, 0.0),
         ("top",    1, +1.0, H),
         ("bottom", 1, -1.0, 0.0),
-        ("front",  2, +1.0, 0.0),
-        ("back",   2, -1.0, D),
+        ("front",  2, -1.0, 0.0),
+        ("back",   2, +1.0, D),
     ]
 
 
@@ -55,15 +59,24 @@ def _assign_faces(
     normals: np.ndarray,
     face_specs: list[tuple[str, int, float, float]],
     scale: float,
+    use_normals: bool = True,
 ) -> list[tuple[str, int, float, float, np.ndarray]]:
+    """Assign each marker to a box face.
+
+    use_normals=True : score blends plane distance with +Z↔face-normal agreement.
+    use_normals=False: pure geometry — assign to the nearest face plane by absolute
+      center-to-plane distance only. Marker orientation is ignored.
+    """
     out = []
     for c, n in zip(centers, normals):
         best, best_score = None, np.inf
         for fname, axis, sign, off in face_specs:
             face_n = np.zeros(3); face_n[axis] = sign
-            cos_a = float(np.dot(n, face_n))
-            signed_dist = sign * (c[axis] - off)
-            score = (1.0 - cos_a) + abs(signed_dist) / scale
+            if use_normals:
+                cos_a = float(np.dot(n, face_n))
+                score = (1.0 - cos_a) + abs(sign * (c[axis] - off)) / scale
+            else:
+                score = abs(c[axis] - off)
             if score < best_score:
                 best_score = score
                 best = (fname, axis, sign, off, face_n)
@@ -117,30 +130,75 @@ def _solve_translation(
     return t
 
 
-def _corner_plane_residuals(
+def _combined_residuals(
     xi: np.ndarray,
     pts_ba: np.ndarray,
+    normals0: np.ndarray,
     axes: np.ndarray,
+    signs: np.ndarray,
     offs: np.ndarray,
+    sqrt_w: np.ndarray,
+    w_normal: np.ndarray,
 ) -> np.ndarray:
+    """Stacked residual for the global SE(3): per-corner plane distance + per-marker
+    normal misalignment. Both blocks carry per-marker sqrt-weights; the normal block
+    is scaled (in _fit_fixed_faces) into corner-displacement length so it is
+    commensurate with the plane block (meters)."""
     T = _se3_exp(xi)
-    pts = pts_ba @ T[:3, :3].T + T[:3, 3]
+    R = T[:3, :3]
+    t = T[:3, 3]
+
+    pts = pts_ba @ R.T + t
     coord = np.take_along_axis(
-        pts,
-        axes[:, None, None].repeat(4, axis=1),
-        axis=2,
+        pts, axes[:, None, None].repeat(4, axis=1), axis=2,
     )[:, :, 0]
-    return (coord - offs[:, None]).ravel()
+    plane = ((coord - offs[:, None]) * sqrt_w[:, None]).ravel()       # (M*4,)
+
+    M = len(axes)
+    target = np.zeros((M, 3))
+    target[np.arange(M), axes] = signs                               # outward face normal
+    n_box = normals0 @ R.T                                            # (M,3)
+    normal = ((n_box - target) * w_normal[:, None]).ravel()          # (M*3,)
+
+    return np.concatenate([plane, normal])
 
 
 def _fit_fixed_faces(
     marker_poses: np.ndarray,
     axes: np.ndarray,
     offs: np.ndarray,
+    signs: np.ndarray,
     marker_side_m: float,
+    weights: np.ndarray | None = None,
+    normal_weight: float = 1.0,
+    use_normals: bool = True,
 ) -> tuple[np.ndarray, float]:
+    """Solve one global SE(3) snapping marker corners onto their face planes AND
+    (optionally) aligning each marker's +Z to the outward face normal (sign*e_axis).
+
+    weights: (M,) per-marker confidence (e.g. n_obs / reproj-rms). Under-observed or
+      high-residual markers are downweighted so they cannot drag the global fit.
+      Combined with a robust soft_l1 loss that caps the influence of gross outliers
+      (e.g. a side marker seen in a single image).
+    normal_weight: relative pull of the normal term vs the plane term (1.0 = balanced).
+      The normal term resolves the 180° flip ambiguity that the plane term is blind to.
+    use_normals=False: drop the normal block entirely — minimize plane distance only
+      ("best possible fit", orientation-agnostic). Flips are then resolved downstream
+      by reprojection (resolve_marker_flips).
+    """
     pts_ba = _corners_in_ba_frame(marker_poses, marker_side_m)
     centers0 = np.array([T[:3, 3] for T in marker_poses])
+    normals0 = np.array([T[:3, 2] for T in marker_poses])
+    normals0 = normals0 / np.linalg.norm(normals0, axis=1, keepdims=True)
+
+    M = len(axes)
+    w = np.ones(M) if weights is None else np.clip(weights, 0.0, None)
+    sqrt_w = np.sqrt(w)
+    # A tilt δ moves a marker corner by ~(s/2)·δ; scale the (≈δ) normal residual by
+    # that length so plane and normal blocks share units (meters). use_normals=False
+    # zeros this block, leaving a pure plane-distance objective.
+    nw = normal_weight if use_normals else 0.0
+    w_normal = sqrt_w * (0.5 * marker_side_m * nw)
 
     best_T = np.eye(4)
     best_cost = np.inf
@@ -151,10 +209,12 @@ def _fit_fixed_faces(
         T0[:3, 3] = t0
         xi0 = _se3_log(T0)
         sol = least_squares(
-            _corner_plane_residuals,
+            _combined_residuals,
             xi0,
-            args=(pts_ba, axes, offs),
+            args=(pts_ba, normals0, axes, signs, offs, sqrt_w, w_normal),
             method="trf",
+            loss="soft_l1",
+            f_scale=0.004,
             max_nfev=500,
             ftol=1e-12,
             xtol=1e-12,
@@ -174,6 +234,8 @@ def fit_box_frame(
     marker_side_m: float,
     max_assign_iter: int = 50,
     progress_cb: Callable[[int, int], None] | None = None,
+    weights: np.ndarray | None = None,
+    use_normals: bool = True,
 ) -> tuple[np.ndarray, list[str], dict]:
     """SE(3) box-frame fit with inferred face assignments and rigid markers.
 
@@ -181,10 +243,17 @@ def fit_box_frame(
     and rotations remain unchanged; we choose the box pose/orientation that best
     places all marker corners onto box face planes.
 
+    No face labels are required — assignment is inferred from geometry. With
+    use_normals=False, both the assignment and the objective are pure plane-distance
+    (orientation-agnostic "best possible fit"); per-marker flips are resolved later
+    by reprojection (resolve_marker_flips).
+
     Args:
       marker_poses: (M,4,4) SE(3), meters, in BA-output frame.
       W_mm, H_mm, D_mm: physical box dimensions (mm).
       marker_side_m: physical marker side (m), kept for API parity.
+      weights: (M,) per-marker confidence; sparse/noisy markers downweighted.
+      use_normals: include the +Z↔face-normal term (default) or drop it.
 
     Returns:
       T_align: (4,4) SE(3), BA-output frame → box frame.
@@ -221,12 +290,15 @@ def fit_box_frame(
             t = cur_T[:3, 3]
             c_r = centers0 @ R.T + t
             n_r = normals0 @ R.T
-            cur_assigns = _assign_faces(c_r, n_r, specs, scale)
+            cur_assigns = _assign_faces(c_r, n_r, specs, scale, use_normals=use_normals)
             labels = tuple(a[0] for a in cur_assigns)
 
             axes = np.array([a[1] for a in cur_assigns], dtype=np.int64)
+            signs = np.array([a[2] for a in cur_assigns], dtype=np.float64)
             offs = np.array([a[3] for a in cur_assigns], dtype=np.float64)
-            cur_T, cur_cost = _fit_fixed_faces(marker_poses, axes, offs, marker_side_m)
+            cur_T, cur_cost = _fit_fixed_faces(
+                marker_poses, axes, offs, signs, marker_side_m,
+                weights=weights, use_normals=use_normals)
 
             if labels == prev_labels:
                 break
@@ -273,12 +345,18 @@ def fit_box_frame_with_labels(
     H_mm: float,
     D_mm: float,
     marker_side_m: float,
+    weights: np.ndarray | None = None,
+    normal_weight: float = 1.0,
 ) -> tuple[np.ndarray, list[str], dict]:
     """SE(3) box-frame fit with face assignments FIXED from user labels.
 
     Skips the 24-rotation multi-start + assignment alternation in fit_box_frame.
-    Use this when box.yaml provides a 'face' key per marker — the geometry is
+    Use this when the box config provides a 'face' key per marker — the geometry is
     pinned, and we only solve for one global SE(3) that maps BA frame → box frame.
+
+    weights: (M,) per-marker confidence (e.g. n_obs / reproj-rms). Under-observed or
+      high-residual markers are downweighted so they don't drag the global fit.
+    normal_weight: relative pull of the normal-alignment term vs the plane term.
     """
     W = W_mm / 1000.0
     H = H_mm / 1000.0
@@ -302,7 +380,9 @@ def fit_box_frame_with_labels(
     for i in range(M):
         normals_box[i, axes[i]] = spec_by_name[face_labels[i]][1]
 
-    T_align, best_cost = _fit_fixed_faces(marker_poses, axes, offs, marker_side_m)
+    T_align, best_cost = _fit_fixed_faces(
+        marker_poses, axes, offs, signs, marker_side_m,
+        weights=weights, normal_weight=normal_weight)
 
     R = T_align[:3, :3]; t = T_align[:3, 3]
     pts_ba = _corners_in_ba_frame(marker_poses, marker_side_m)
@@ -348,3 +428,77 @@ def apply_box_fit(result, T_align: np.ndarray) -> None:
     for i in range(n_cams):
         T_new = T_cams[i] @ T_inv
         result.x[6 * i : 6 * i + 6] = _se3_log(T_new)
+
+
+def _marker_reproj_rms(
+    R: np.ndarray,
+    c: np.ndarray,
+    dets: list[tuple[int, np.ndarray]],
+    T_cam_box: np.ndarray,
+    corners_mkr: np.ndarray,
+    K: np.ndarray,
+) -> float:
+    """RMS reprojection (px) of one marker's corners over all images that saw it."""
+    if not dets:
+        return 0.0
+    T_mk = np.eye(4)
+    T_mk[:3, :3] = R
+    T_mk[:3, 3] = c
+    se, n = 0.0, 0
+    for cam_idx, obs in dets:
+        P = T_cam_box[cam_idx] @ T_mk
+        pc = (P[:3, :3] @ corners_mkr.T + P[:3, 3:4]).T          # (4,3)
+        z = pc[:, 2]
+        u = K[0, 0] * pc[:, 0] / z + K[0, 2]
+        v = K[1, 1] * pc[:, 1] / z + K[1, 2]
+        proj = np.stack([u, v], axis=1)
+        se += float(np.sum((proj - obs) ** 2))
+        n += 4
+    return float(np.sqrt(se / max(n, 1)))
+
+
+def resolve_marker_flips(
+    result,
+    outward_normals: np.ndarray,
+    K: np.ndarray,
+    marker_side_m: float,
+) -> list[int]:
+    """Fix per-marker 180° flips left in the BA cloud (in-place, box frame).
+
+    A flat marker's +Z must equal its outward face normal. Where BA settled on the
+    flipped pose (+Z·N < 0) — a 180° rotation about an in-plane axis — the two valid
+    un-flips differ by a 180° twist about the normal. We pick whichever reprojects
+    best across ALL images that saw the marker, which is the multi-view information
+    BA's near-frontal-dominated, Huber-capped objective failed to commit to.
+
+    Markers that are merely tilted/garbage (+Z·N ≥ 0, e.g. seen once) are left as-is.
+    Call AFTER apply_box_fit (needs camera poses + marker poses in box frame).
+    Returns the list of marker IDs that were flipped back.
+    """
+    n_cams = result.n_cams
+    T_cam_box = _se3_exp_batch(result.x[: 6 * n_cams].reshape(n_cams, 6))
+    corners_mkr = marker_corners_mkr_frame(marker_side_m)
+
+    dets_by_mk: dict[int, list[tuple[int, np.ndarray]]] = {}
+    for cam_idx, mk_idx, obs in result.detection_list:
+        dets_by_mk.setdefault(mk_idx, []).append((cam_idx, obs))
+
+    Rx = np.diag([1.0, -1.0, -1.0])   # 180° about marker x: +Z→−Z, keeps twist A
+    Ry = np.diag([-1.0, 1.0, -1.0])   # 180° about marker y: +Z→−Z, twist B (=A+180°)
+
+    flipped: list[int] = []
+    for i in range(result.n_markers):
+        R = result.marker_poses[i][:3, :3]
+        c = result.marker_poses[i][:3, 3]
+        N = outward_normals[i]
+        if float(R[:, 2] @ N) >= 0.0:
+            continue                                            # not flipped
+        dets = dets_by_mk.get(i, [])
+        cand_a = R @ Rx
+        cand_b = R @ Ry
+        ra = _marker_reproj_rms(cand_a, c, dets, T_cam_box, corners_mkr, K)
+        rb = _marker_reproj_rms(cand_b, c, dets, T_cam_box, corners_mkr, K)
+        result.marker_poses[i][:3, :3] = cand_a if ra <= rb else cand_b
+        flipped.append(result.marker_ids[i])
+
+    return flipped

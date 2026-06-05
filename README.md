@@ -9,8 +9,9 @@ Multi-camera measurement system that validates an acoustic levitation simulator 
 ```
 AcousticLevitation/
 ├── config/
-│   ├── box.yaml                  # Box dimensions, ArUco marker positions, box→sim transform
-│   └── cameras.yaml              # Camera IDs, serials, intrinsics paths, capture settings
+│   ├── box_startPoint.yaml       # Seed box dimensions, ArUco marker positions, box→sim transform
+│   └── box.config.yaml           # Calibrated box config written by box calibration
+│   ├── cameras.yaml              # Camera IDs, serials, intrinsics paths, capture settings
 ├── common/
 │   ├── __init__.py               # Shared data classes
 │   ├── io_utils.py               # YAML/JSON I/O helpers
@@ -43,13 +44,13 @@ AcousticLevitation/
 
 | Module | File | Purpose |
 |---|---|---|
-| `config/` | `box.yaml` | Box dims, ArUco marker corners (mm, box frame), box→sim transform |
+| `config/` | `box_startPoint.yaml` / `box.config.yaml` | Seed box dims / calibrated marker corners (mm, box frame), box→sim transform |
 | `config/` | `cameras.yaml` | Camera IDs, serials, intrinsics paths, capture settings |
 | `common/` | `__init__.py` | All shared data classes (`CameraIntrinsics`, `CameraPose`, `BallDetection2D`, `TriangulationResult`, `ErrorBudget`, `ComparisonResult`) |
 | `common/` | `io_utils.py` | YAML/JSON I/O, intrinsics load/save, box config loader, numpy serializer |
 | `common/` | `se3_utils.py` | SE(3) Lie algebra: `_hat`, `_se3_log`, `_se3_exp`, `_average_se3` |
 | `intrinsic_calibration/` | `calibrate.py` | ChArUco detection (new + legacy API), per-image outlier rejection, saves YAML |
-| `box_calibration/` | `calibrate.py` | Bundle adjustment to refine marker center positions; writes `corners_box_frame` back to `box.yaml` |
+| `box_calibration/` | `calibrate.py` | Bundle adjustment to refine marker center positions; writes `corners_box_frame` to `box.config.yaml` |
 | `capture/` | `capture.py` | UVC autofocus/auto-exposure disable, N-frame capture per camera, metadata JSON |
 | `extrinsic_solver/` | `solve.py` | ArUco board pose via `estimatePoseBoard`, SE(3) Lie algebra averaging over frames |
 | `ball_detector/` | `detect.py` | Optional background subtraction (absdiff) → Otsu threshold → numbered blob selection UI or auto-largest → Canny edge circle fit (LSQ) → temporal averaging |
@@ -79,7 +80,7 @@ Required packages:
 ## Physical Setup
 
 1. Build a matte-black cuboid box (3D printed or CNC machined).
-2. Print ArUco markers (DICT_4X4_50 recommended). Measure actual printed side length with calipers — printers have 0.5–1% scaling error. Enter the measured value as `marker_side_mm` in `box.yaml`.
+2. Print ArUco markers (DICT_4X4_50 recommended). Measure actual printed side length with calipers — printers have 0.5–1% scaling error. Enter the measured value as `marker_side_mm` in `box_startPoint.yaml`.
 3. Attach markers to box faces (see placement guide below).
 4. Place 3–4 USB webcams on rigid tripods with ≥ 90° angular spread around the box.
 5. Set up diffuse, uniform lighting (softbox or diffuse panel). Lock white balance on all cameras.
@@ -190,7 +191,7 @@ The solver requires ≥ 3 markers from ≥ 2 different faces per frame. More mar
 
 ---
 
-### Configuring box.yaml (no manual corner measurement needed)
+### Configuring box_startPoint.yaml (no manual corner measurement needed)
 
 Just fill in box size, marker size, and which ID is on which face:
 
@@ -335,7 +336,7 @@ The detector picks these up automatically — no CLI flag needed. When this GUI 
 
 ### Step 0 — Configure
 
-Edit `config/box.yaml`:
+Edit `config/box_startPoint.yaml`:
 - Set `box_dimensions` (mm) — measure with calipers.
 - Set `marker_side_mm` — measure the **printed** marker size with calipers, not the design file value.
 - List markers with `face` and `id`. Corner positions are computed automatically. For top-face markers add `center_box_mm: [x, y, z]` (see Marker Placement Guide above).
@@ -381,14 +382,16 @@ Repeat for every camera. Saves `calibration/<camera_id>_intrinsics.yaml` per cam
 
 ### Step 1b — Box Marker Calibration (optional, one-time)
 
+> See [Box_Cali.md](Box_Cali.md) for capture tips, recommended camera setup, and initial RMS guidance.
+
 If manually measuring marker positions to sub-millimeter accuracy is impractical, run bundle adjustment to refine them from images. Capture 10–30 images of the box from varied angles using a single pre-calibrated camera, then:
 
 ```bash
 python -m box_calibration.calibrate \
     --images-dir  data/box_calib/ \
     --intrinsics  calibration/cam_front_intrinsics.yaml \
-    --box-config  config/box.yaml \
-    --output      config/box.yaml \
+    --box-config  config/box_startPoint.yaml \
+    --output      config/box.config.yaml \
     --min-markers 3 \
     --max-reproj-px 1.5 \
     --debug-dir   debug/box_cal/
@@ -398,13 +401,13 @@ python -m box_calibration.calibrate \
 |---|---|---|
 | `--images-dir` | required | Directory of calibration images (jpg/png) |
 | `--intrinsics` | required | Intrinsics YAML for the camera used |
-| `--box-config` | `config/box.yaml` | Input box config (needs `face` on every marker) |
-| `--output` | `config/box.yaml` | Destination (can overwrite input) |
+| `--box-config` | `config/box_startPoint.yaml` | Seed box config (needs `face` on every marker) |
+| `--output` | `config/box.config.yaml` | Calibrated output config |
 | `--min-markers` | `3` | Min visible markers per image for acceptance |
 | `--max-reproj-px` | `1.5` | Warn if final RMS exceeds this value |
 | `--debug-dir` | off | Save annotated images (green = detected, red = reprojected refined) |
 
-The optimizer jointly solves per-image camera poses and per-marker center offsets + in-plane rotation, with each marker constrained to its declared face plane by the parameterization. On success the refined `corners_box_frame` values (mm) are written into `box.yaml`; the `face` key is preserved for documentation.
+The optimizer jointly solves per-image camera poses and per-marker center offsets + in-plane rotation, with each marker constrained to its declared face plane by the parameterization. On success the refined `corners_box_frame` values (mm) are written into `box.config.yaml`; the `face` key is preserved for documentation.
 
 **Shooting tips:** vary azimuth by 30–60° between shots, include steep angles to constrain depth. Require at least 3 different markers per image. Final RMS should be ≤ 1 px; values > 1.5 px warrant inspection of the debug images.
 
@@ -459,7 +462,7 @@ Once calibration is done and frames are captured, run all remaining stages with 
 python run_pipeline.py \
     --session sessions/session_001 \
     --sim-output simulation_outputs/hardware_trap_runs/attempt_004/summary.json \
-    --box-config config/box.yaml \
+    --box-config config/box.config.yaml \
     --cameras-config config/cameras.yaml \
     --calibration-dir calibration \
     --threshold-mm 2.0 \
@@ -470,7 +473,7 @@ python run_pipeline.py \
 |---|---|---|
 | `--session` | required | Session directory |
 | `--sim-output` | required | `summary.json` or `final_candidates_*.csv` from `sim.py` |
-| `--box-config` | `config/box.yaml` | Box configuration |
+| `--box-config` | `config/box.config.yaml` | Calibrated box configuration |
 | `--cameras-config` | `config/cameras.yaml` | Cameras configuration |
 | `--calibration-dir` | `calibration` | Directory with intrinsics YAML files |
 | `--threshold-mm` | `2.0` | Pass/fail Euclidean distance threshold (mm) |
@@ -499,7 +502,7 @@ Pipeline stages run in order:
 ```bash
 python -m extrinsic_solver.solve \
     --session sessions/session_001 \
-    --box-config config/box.yaml \
+    --box-config config/box.config.yaml \
     --cameras-config config/cameras.yaml \
     --calibration-dir calibration \
     --min-markers 3 \
@@ -560,7 +563,7 @@ python -m triangulation.triangulate \
 ```bash
 python -m error_propagation.propagate \
     --session sessions/session_001 \
-    --box-config config/box.yaml \
+    --box-config config/box.config.yaml \
     --cameras-config config/cameras.yaml \
     --calibration-dir calibration \
     --n-mc 500
@@ -571,7 +574,7 @@ python -m error_propagation.propagate \
 python -m comparison.compare \
     --session sessions/session_001 \
     --sim-output simulation_outputs/hardware_trap_runs/attempt_004/summary.json \
-    --box-config config/box.yaml \
+    --box-config config/box.config.yaml \
     --threshold-mm 2.0 \
     --sim-rank 1
 ```
@@ -655,7 +658,7 @@ The rank-1 candidate is the strongest predicted trap (lowest Gor'kov potential, 
 | **Simulator frame** | Center of transducer array, z up | meters | `sim.py` output |
 | **Camera frame** | Camera optical center | meters | Projection matrices |
 
-The `box_to_sim` section in `box.yaml` defines the 4×4 SE(3) transform from box frame to simulator frame. **Edit this to match the physical placement of the box above the transducer array before comparing results.**
+The `box_to_sim` section in `box.config.yaml` defines the 4×4 SE(3) transform from box frame to simulator frame. **Edit this to match the physical placement of the box above the transducer array before comparing results.**
 
 ---
 

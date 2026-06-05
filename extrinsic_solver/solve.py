@@ -13,7 +13,7 @@ Returns a CameraPose (4×4 T_cam_box) per camera.
 Usage:
     python -m extrinsic_solver.solve \\
         --session sessions/session_001 \\
-        --box-config config/box.yaml \\
+        --box-config config/box.config.yaml \\
         --cameras-config config/cameras.yaml \\
         --calibration-dir calibration/ \\
         --output sessions/session_001/extrinsics.json
@@ -32,6 +32,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common import CameraIntrinsics, CameraPose
 from common.io_utils import (
+    default_box_config_path,
     load_box_config,
     load_cameras_config,
     load_intrinsics,
@@ -170,7 +171,7 @@ def estimate_camera_pose(
         raise RuntimeError(
             f"Camera {intrinsics.camera_id}: no valid poses estimated. "
             f"Rejected all {len(frame_paths)} frames (min_markers={min_markers}, max_reproj={max_reproj_px} px). "
-            "Check that the box is visible and the box.yaml marker layout is correct."
+            "Check that the box is visible and the box config marker layout is correct."
         )
 
     all_obj = np.vstack(pooled_obj).astype(np.float64)   # (4·M·F, 3)
@@ -279,7 +280,7 @@ def solve_session(
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Extrinsic pose estimation via ArUco board")
     p.add_argument("--session", type=Path, required=True)
-    p.add_argument("--box-config", type=Path, default=Path("config/box.yaml"))
+    p.add_argument("--box-config", type=Path, default=default_box_config_path())
     p.add_argument("--cameras-config", type=Path, default=Path("config/cameras.yaml"))
     p.add_argument("--calibration-dir", type=Path, default=Path("calibration"))
     p.add_argument("--output", type=Path, default=None)

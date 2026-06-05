@@ -8,6 +8,7 @@ Launch:
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -18,6 +19,17 @@ from tkinter import ttk, filedialog, messagebox
 
 import cv2
 from PIL import Image, ImageTk
+
+import matplotlib
+matplotlib.use("TkAgg")
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+from common.io_utils import (
+    box_calibrated_config_path,
+    default_box_startpoint_path,
+    default_box_config_path,
+)
 
 PYTHON = sys.executable
 ROOT   = Path(__file__).resolve().parent
@@ -30,6 +42,8 @@ class App(tk.Tk):
         self.geometry("860x720")
         self.minsize(700, 560)
         self._active_jobs = 0
+        self._boxcal_proc = None          # running box-cal subprocess (for Stop)
+        self._boxcal_rms: list[float] = []  # parsed RMS trace for live graph
         self._build_paths()
         self._build_notebook()
         self._build_status()
@@ -41,7 +55,7 @@ class App(tk.Tk):
         pf.pack(fill="x", padx=8, pady=(8, 2))
 
         self.v_session = self._path_row(pf, "Session dir",     0, kind="dir")
-        self.v_box     = self._path_row(pf, "Box config",      1, default="config/box.yaml")
+        self.v_box     = self._path_row(pf, "Box config",      1, default=str(default_box_config_path()))
         self.v_cams    = self._path_row(pf, "Cameras config",  2, default="config/cameras.yaml")
         self.v_calib   = self._path_row(pf, "Calibration dir", 3, kind="dir", default="calibration")
         self.v_sim     = self._path_row(pf, "Sim output",      4)
@@ -159,18 +173,41 @@ class App(tk.Tk):
 
         self.boxcal_imgs   = self._browse(f, 1, "Images dir",          kind="dir")
         self.boxcal_intr   = self._field(f,  2, "Intrinsics YAML",     "")
-        self.boxcal_out    = self._field(f,  3, "Output config",        "config/box.yaml")
-        self.boxcal_min_mk = self._field(f,  4, "Min markers",          "3")
-        self.boxcal_reproj = self._field(f,  5, "Max reproj (px)",      "1.5")
-        self.boxcal_dbg    = self._browse(f, 6, "Debug dir (optional)", kind="dir")
+        self.boxcal_in     = self._browse(f,  3, "Input seed config",   kind="file")
+        self.boxcal_out    = self._field(f,   4, "Output config",       str(box_calibrated_config_path()))
+        self.boxcal_min_mk = self._field(f,   5, "Min markers",         "3")
+        self.boxcal_reproj = self._field(f,   6, "Max reproj (px)",     "2.0")
+        self.boxcal_dbg    = self._browse(f,  7, "Debug dir (optional)", kind="dir")
 
-        ttk.Label(f, text="Box config taken from Common Paths above.",
-                  foreground="gray").grid(row=7, column=0, columnspan=3,
+        # Sensible project defaults so the tab is runnable without browsing.
+        if not self.boxcal_imgs.get().strip():
+            self.boxcal_imgs.set("captures/boxConfig/box")
+        if not self.boxcal_dbg.get().strip():
+            self.boxcal_dbg.set("captures/boxConfig/debug")
+        if not self.boxcal_in.get().strip():
+            self.boxcal_in.set(str(default_box_startpoint_path()))
+
+        ttk.Label(f, text="Seed config is the input; output config is written separately.",
+                  foreground="gray").grid(row=8, column=0, columnspan=3,
                                           sticky="w", pady=(8, 0))
 
-        ttk.Button(f, text="▶  Run Box Calibration",
-                   command=self._run_box_cal).grid(row=8, column=0, columnspan=3,
-                                                   pady=14, ipadx=10, ipady=4)
+        btns = ttk.Frame(f)
+        btns.grid(row=9, column=0, columnspan=3, pady=14)
+        self._boxcal_run_btn = ttk.Button(btns, text="▶  Run Box Calibration",
+                                          command=self._run_box_cal)
+        self._boxcal_run_btn.pack(side="left", ipadx=10, ipady=4)
+        self._boxcal_stop_btn = ttk.Button(btns, text="■  Stop",
+                                           command=self._stop_box_cal, state="disabled")
+        self._boxcal_stop_btn.pack(side="left", padx=(10, 0), ipadx=10, ipady=4)
+
+        # Live reprojection-RMS graph (updates as bundle adjustment iterates).
+        self._boxcal_fig = Figure(figsize=(5.2, 2.2), dpi=90)
+        self._boxcal_ax = self._boxcal_fig.add_subplot(111)
+        self._boxcal_canvas = FigureCanvasTkAgg(self._boxcal_fig, master=f)
+        self._boxcal_canvas.get_tk_widget().grid(row=10, column=0, columnspan=3,
+                                                 sticky="ew", pady=(4, 0))
+        f.columnconfigure(1, weight=1)
+        self._boxcal_reset_graph()
 
     def _reload_boxcal_cameras(self):
         path = self.v_cams.get().strip()
@@ -200,6 +237,57 @@ class App(tk.Tk):
             if cam["id"] == selected:
                 self.boxcal_intr.set(cam.get("intrinsics_file", ""))
                 break
+
+    # ── Box-cal live RMS graph ────────────────────────────────────────────────
+
+    def _boxcal_reset_graph(self):
+        # Worker appends (iter, rms) tuples here (GIL-atomic); the poll timer draws.
+        self._boxcal_rms = []
+        self._boxcal_rms_drawn = 0
+        ax = self._boxcal_ax
+        ax.clear()
+        ax.set_title(f"Box-cal reprojection RMS (iter ≥ {self._BOXCAL_MIN_ITER})", fontsize=9)
+        ax.set_xlabel("BA evaluation", fontsize=8)
+        ax.set_ylabel("RMS px (log)", fontsize=8)
+        ax.set_yscale("log")
+        ax.tick_params(labelsize=7)
+        ax.grid(True, which="both", alpha=0.3)
+        (self._boxcal_line,) = ax.plot([], [], "o-", color="#1f77b4",
+                                       linewidth=1.2, markersize=4)
+        self._boxcal_fig.tight_layout()
+        self._boxcal_canvas.draw_idle()
+
+    def _boxcal_update_graph(self):
+        """Redraw only if new points arrived. Cheap: set_data + autoscale, no clear.
+        Skips the first _BOXCAL_MIN_ITER BA evaluations (the early transient)."""
+        data = self._boxcal_rms
+        if len(data) == self._boxcal_rms_drawn:
+            return
+        self._boxcal_rms_drawn = len(data)
+        pts = [(it, r) for (it, r) in data if it >= self._BOXCAL_MIN_ITER and r > 0]
+        if not pts:
+            return
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        ax = self._boxcal_ax
+        self._boxcal_line.set_data(xs, ys)
+        ax.relim()
+        ax.autoscale_view()
+        ax.set_title(f"Box-cal reprojection RMS  (latest {ys[-1]:.3f} px @ iter {xs[-1]})",
+                     fontsize=9)
+        self._boxcal_canvas.draw_idle()
+
+    def _boxcal_poll_graph(self):
+        self._boxcal_update_graph()
+        if self._boxcal_proc is not None:
+            self.after(250, self._boxcal_poll_graph)
+
+    def _stop_box_cal(self):
+        proc = self._boxcal_proc
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            self._status_text.set("Box calibration stopped by user")
+            print("\n[Box calibration: STOP requested]\n", flush=True)
 
     # ── Tab 2: Capture ────────────────────────────────────────────────────────
 
@@ -551,18 +639,76 @@ class App(tk.Tk):
         self._run_command(cmd, "Intrinsic Calibration")
 
     def _run_box_cal(self):
+        box_seed = self.boxcal_in.get().strip()
+        if not box_seed:
+            messagebox.showerror(
+                "Missing path",
+                "Set the Box Cal input seed config (box_startPoint.yaml).",
+            )
+            return
         cmd = [
             PYTHON, "-m", "box_calibration.calibrate",
             "--images-dir",    self.boxcal_imgs.get(),
             "--intrinsics",    self.boxcal_intr.get(),
-            "--box-config",    self.v_box.get(),
+            "--box-config",    box_seed,
             "--output",        self.boxcal_out.get(),
             "--min-markers",   self.boxcal_min_mk.get(),
             "--max-reproj-px", self.boxcal_reproj.get(),
         ]
         if self.boxcal_dbg.get().strip():
             cmd += ["--debug-dir", self.boxcal_dbg.get()]
-        self._run_command(cmd, "Box Marker Calibration")
+        self._run_box_cal_command(cmd, "Box Marker Calibration")
+
+    # Bundle-adjustment trace line: "  RMS-track <cumulative_nfev> <rms>".
+    _RMS_TRACK_RE = re.compile(r"RMS-track\s+(\d+)\s+([0-9.]+)")
+    _BOXCAL_MIN_ITER = 500   # don't plot the first N BA evaluations (early transient)
+
+    def _run_box_cal_command(self, cmd: list[str], header: str) -> None:
+        """Box-cal runner: pipes stdout to parse the live RMS graph, tracks the
+        process for the Stop button. stderr stays on the terminal (tqdm bar)."""
+        sep = "─" * 58
+        print(f"\n{sep}\n  {header}\n{sep}", flush=True)
+        self._job_start(header)
+        self._boxcal_reset_graph()
+        self._boxcal_run_btn.config(state="disabled")
+        self._boxcal_stop_btn.config(state="normal")
+
+        def _worker():
+            try:
+                env = os.environ.copy()
+                env["PYTHONPATH"] = str(ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+                env["PYTHONIOENCODING"] = "utf-8"
+                env["PYTHONUNBUFFERED"] = "1"   # stream child prints live (pipe is block-buffered otherwise)
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=None,
+                    cwd=str(ROOT), env=env, text=True,
+                    encoding="utf-8", errors="replace", bufsize=1,
+                )
+                self._boxcal_proc = proc
+                self.after(0, self._boxcal_poll_graph)   # start the redraw timer
+                for line in proc.stdout:
+                    # Parse in-thread (cheap, GIL-safe append); the timer draws.
+                    m = self._RMS_TRACK_RE.search(line)
+                    if m is not None:
+                        try:
+                            self._boxcal_rms.append((int(m.group(1)), float(m.group(2))))
+                        except ValueError:
+                            pass
+                    # RMS-track lines are graph-only; don't clutter the terminal.
+                    if "RMS-track" not in line:
+                        print(line, end="", flush=True)
+                proc.wait()
+                print(f"[Exit {proc.returncode}]\n", flush=True)
+            except Exception as exc:
+                print(f"LAUNCH ERROR: {exc}", flush=True)
+            finally:
+                self._boxcal_proc = None
+                self.after(0, self._boxcal_update_graph)  # final catch-up draw
+                self.after(0, lambda: self._boxcal_run_btn.config(state="normal"))
+                self.after(0, lambda: self._boxcal_stop_btn.config(state="disabled"))
+                self.after(0, self._job_done)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _run_list_cameras(self):
         self._run_command(

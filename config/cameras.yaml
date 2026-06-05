@@ -31,6 +31,14 @@ cameras:
     exposure: 156
     focus: 0
 
+  - id: iphone_x 
+    device_index: 99          # iphone X for only box calibration 
+    intrinsics_file: calibration/iphone_x_intrinsics.yaml
+    capture_resolution: [4032, 3024]
+    exposure: 156
+    focus: 0
+
+
 
 # Number of frames to capture per camera per session.
 frames_per_camera: 200
