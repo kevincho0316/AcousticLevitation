@@ -1,6 +1,8 @@
 # Acoustic Levitation Measurement System
 
-Multi-camera measurement system that validates an acoustic levitation simulator against real-world experiments. A white styrofoam ball suspended in a static acoustic trap inside a black box is observed by multiple USB webcams. The system reconstructs the ball's 3D position and compares it to the simulator's predicted trap location.
+Multi-camera measurement system that validates an acoustic levitation simulator against real-world experiments. A white styrofoam ball suspended in a static acoustic trap on a black box is observed by multiple USB webcams. The system reconstructs the ball's 3D position and compares it to the simulator's predicted trap location.
+
+> **Step-by-step operating guide:** [Instuction.md](Instuction.md)
 
 ---
 
@@ -111,7 +113,7 @@ The software defines the box origin at the **front-bottom-left corner**:
    Z ↗  (front to back, depth)
 ```
 
-The ball is suspended inside the box. Cameras look in through the open face or gaps.
+The ball is suspended on the box. Cameras look in through the open face or gaps.
 
 ---
 

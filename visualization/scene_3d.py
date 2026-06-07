@@ -37,15 +37,36 @@ _FACE_COLOURS = {
 _CAM_COLOURS = ["#ff5252", "#448aff", "#00c853", "#ffab00",
                 "#d500f9", "#00bcd4", "#ff6d00", "#c6ff00"]
 
-# matplotlib always draws its Z axis vertical. Box frame has height on Y, so
-# remap box (X,Y,Z) -> plot (X, Z, Y): the vertical plot axis becomes height,
-# OpenGL-style. Every point is passed through _to_plot before being drawn.
-_PLOT_PERM = [0, 2, 1]
-
+# Box frame (README):  X → right (width), Y ↑ up (height), Z ↗ depth (front→back)
+# OpenGL convention:   X → right,           Y ↑ up,          Z toward viewer
+#   Box Z is INTO the scene, so we negate it: plot_Z_depth = -box_Z
+#   This keeps the origin (front-bottom-left) consistent and makes the front
+#   face (box Z=0) appear at display depth 0 with the back face at -depth.
+#
+# Matplotlib always draws its own Z axis as vertical ("up"), so we map:
+#   box X       -> plot X  (unchanged)
+#   -(box Z)    -> plot Y  (negated depth; front face at 0, back face negative)
+#   box Y       -> plot Z  (matplotlib vertical = box height)
+#
+# Every point passes through _to_plot before being drawn.
 
 def _to_plot(pts) -> np.ndarray:
-    """Box-frame (X,Y,Z) -> plot-frame (X, Z, Y) so height points up."""
-    return np.asarray(pts, dtype=float)[..., _PLOT_PERM]
+    """Box-frame (X, Y, Z) -> plot-frame (X, -Z, Y).
+
+    Matches OpenGL convention: X right, Y up (matplotlib vertical), Z toward
+    viewer (negated box depth so front face is at positive display depth).
+    """
+    arr = np.asarray(pts, dtype=float)
+    out = arr[..., [0, 2, 1]].copy()
+    out[..., 1] *= -1  # negate box Z so front is at display-Y=0, back at -depth
+    return out
+
+
+# Default initial view: front-right-above, matching the README box diagram.
+# With _to_plot applied: camera at positive display-X (box right) and
+# positive display-Y (-box Z = in front of front face) → sees front+right+top.
+_DEFAULT_ELEV = 25.0
+_DEFAULT_AZIM = 45.0
 
 
 # ── Scene loading ─────────────────────────────────────────────────────────────
@@ -196,8 +217,12 @@ def _set_equal_aspect(ax, all_pts: np.ndarray) -> None:
 def render_scene(session_dir: Path | None, box_config_path: Path, ax) -> dict:
     """Draw the full scene onto a 3D axes. Returns the loaded scene dict."""
     scene = load_scene(session_dir, box_config_path)
-    # Preserve the viewing angle across refreshes (ax.clear resets it).
-    elev, azim = ax.elev, ax.azim
+    # Preserve viewing angle across refreshes; use sensible default on first render.
+    elev = ax.elev if ax.elev is not None else _DEFAULT_ELEV
+    azim = ax.azim if ax.azim is not None else _DEFAULT_AZIM
+    # matplotlib default is elev=30, azim=-60 — override with our OpenGL default.
+    if abs(elev - 30.0) < 0.1 and abs(azim - (-60.0)) < 0.1:
+        elev, azim = _DEFAULT_ELEV, _DEFAULT_AZIM
     ax.clear()
     ax.view_init(elev=elev, azim=azim)
     collected: list[np.ndarray] = []
@@ -240,10 +265,11 @@ def render_scene(session_dir: Path | None, box_config_path: Path, ax) -> dict:
     all_pts = np.vstack(collected) if collected else np.empty((0, 3))
     _set_equal_aspect(ax, all_pts)
 
-    # Axes are in plot order (X, Z, Y); vertical axis is box-frame height.
-    ax.set_xlabel("X · width (mm)")
-    ax.set_ylabel("Z · depth (mm)")
-    ax.set_zlabel("Y · height (mm)")
+    # Labels in box-frame notation (X right, Y up, Z front→back).
+    # plot X = box X, plot Y = -box Z (depth, negated), plot Z (vertical) = box Y.
+    ax.set_xlabel("X  →  (mm)")
+    ax.set_ylabel("−Z  (depth, mm)")
+    ax.set_zlabel("Y  ↑  (mm)")
     n_cam = len(scene["cameras"])
     n_mk = len(scene["markers"])
     has_ball = "ball" if scene["ball"] is not None else "no ball"

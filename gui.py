@@ -7,6 +7,7 @@ Launch:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -18,6 +19,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 
 import matplotlib
@@ -117,7 +119,7 @@ class App(tk.Tk):
         self.cal_sq_len = self._field(f,  6, "Square length (m)", "0.015")
         self.cal_mk_len = self._field(f,  7, "Marker length (m)", "0.011")
         self.cal_dict   = self._field(f,  8, "ArUco dict",        "DICT_4X4_50")
-        self.cal_reproj = self._field(f,  9, "Max reproj (px)",   "1.0")
+        self.cal_reproj = self._field(f,  9, "Max reproj (px)",   "2.5")
 
         ttk.Button(f, text="▶  Run Calibration",
                    command=self._run_calibrate).grid(row=10, column=0, columnspan=3,
@@ -354,8 +356,8 @@ class App(tk.Tk):
                         variable=self.det_interactive).grid(
             row=4, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-        ttk.Label(f, text="Opens a window per camera. All blobs shown numbered.\n"
-                          "Click blob or press 1–9 to select. Enter = confirm. ESC = cancel.",
+        ttk.Label(f, text="Opens a dialog per camera inside the GUI.\n"
+                          "Click the ball center, then press Next → for each camera.",
                   foreground="gray", justify="left").grid(
             row=5, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
@@ -749,7 +751,25 @@ class App(tk.Tk):
             "--roi-radius",      self.det_roi_r.get(),
         ]
         if self.det_interactive.get():
-            cmd.append("--interactive")
+            try:
+                from common.io_utils import load_cameras_config
+                cam_cfg = load_cameras_config(self.v_cams.get())
+            except Exception as exc:
+                messagebox.showerror("Config error", str(exc))
+                return
+            dlg = _BlobSelectorDialog(
+                self,
+                cameras=cam_cfg["cameras"],
+                session_dir=Path(self.v_session.get()),
+                calibration_dir=Path(self.v_calib.get()),
+                min_area=int(self.det_min_area.get()),
+                max_area=int(self.det_max_area.get()),
+            )
+            if dlg.result is None:
+                print("Interactive selection cancelled.")
+                return
+            if dlg.result:
+                cmd += ["--roi-centers", json.dumps(dlg.result)]
         if self.det_bg_mode.get() == "median":
             cmd.append("--median-background")
         self._run_command(cmd, "Ball Detector")
@@ -827,6 +847,251 @@ class App(tk.Tk):
 # ── Camera preview helpers ─────────────────────────────────────────────────
 
 _CV_BACKEND = cv2.CAP_V4L2 if sys.platform != "win32" else cv2.CAP_DSHOW
+
+
+# ── Interactive blob selector (Tkinter — no cv2 window needed) ────────────────
+
+_BLOB_OVERLAY_COLORS = [
+    (0, 255, 255), (255, 128, 0), (0, 128, 255), (255, 0, 255),
+    (0, 255, 128), (128, 255, 0), (255, 255, 0),
+]
+
+
+class _BlobSelectorDialog(tk.Toplevel):
+    """Show the first undistorted frame per camera with blob overlay; user clicks ball center."""
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        cameras: list[dict],
+        session_dir: Path,
+        calibration_dir: Path,
+        min_area: int = 50,
+        max_area: int = 50_000,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Interactive Ball Selection")
+        self.resizable(True, True)
+        self.result: dict[str, list[int]] | None = None
+
+        self._cameras = [c for c in cameras
+                         if (session_dir / c["id"]).exists()]
+        self._session_dir = session_dir
+        self._calib_dir = calibration_dir
+        self._min_area = min_area
+        self._max_area = max_area
+        self._centers: dict[str, list[int]] = {}
+        self._cam_idx = 0
+        self._click_pt: tuple[int, int] | None = None
+        self._blobs: list[dict] = []
+        self._img_tk = None
+        self._frame_rgb = None
+        self._scale = 1.0
+        self._off_x = 0
+        self._off_y = 0
+
+        self._build_ui()
+        if self._cameras:
+            self._load_camera(0)
+        else:
+            messagebox.showerror("No cameras", "No session frame dirs found.", parent=self)
+            self.destroy()
+            return
+
+        self.grab_set()
+        self.wait_window()
+
+    def _build_ui(self) -> None:
+        top = ttk.Frame(self, padding=6)
+        top.pack(fill="x")
+        self._cam_label = ttk.Label(top, text="", font=("", 11, "bold"))
+        self._cam_label.pack(side="left")
+        ttk.Label(top, text="Click ball, then Next →", foreground="gray").pack(side="right")
+
+        self._canvas = tk.Canvas(self, bg="black", cursor="crosshair",
+                                 width=900, height=600)
+        self._canvas.pack(fill="both", expand=True)
+        self._canvas.bind("<Button-1>", self._on_click)
+        self._canvas.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Key>", self._on_key)
+        self.bind("<Return>", lambda _e: self._next())
+        self.bind("<KP_Enter>", lambda _e: self._next())
+
+        bot = ttk.Frame(self, padding=6)
+        bot.pack(fill="x")
+        ttk.Button(bot, text="Cancel", command=self._cancel).pack(side="left")
+        self._coord_lbl = ttk.Label(bot, text="No point selected", foreground="gray")
+        self._coord_lbl.pack(side="left", padx=12)
+        self._next_btn = ttk.Button(bot, text="Next →", command=self._next,
+                                    state="disabled")
+        self._next_btn.pack(side="right")
+
+    def _load_camera(self, idx: int) -> None:
+        self._cam_idx = idx
+        cam = self._cameras[idx]
+        cam_id = cam["id"]
+        n = len(self._cameras)
+        self._cam_label.config(text=f"Camera {idx + 1}/{n}: {cam_id}")
+        self._click_pt = None
+        self._blobs = []
+        self._coord_lbl.config(text="No point selected")
+        self._next_btn.config(state="disabled")
+        self._frame_rgb = None
+
+        frame_dir = self._session_dir / cam_id
+        frames = sorted(frame_dir.glob("frame_*.png"))
+        if not frames:
+            self._redraw()
+            return
+
+        img = cv2.imread(str(frames[0]))
+        if img is None:
+            self._redraw()
+            return
+
+        intr_file = cam.get("intrinsics_file", "")
+        intr_path = self._calib_dir / Path(intr_file).name
+        K = dist = None
+        if intr_path.exists():
+            from common.io_utils import load_intrinsics
+            intr = load_intrinsics(intr_path)
+            K = intr.K.astype(np.float32)
+            dist = intr.dist.astype(np.float32)
+            img = cv2.undistort(img, K, dist)
+
+        # Background subtraction — mirror detect_ball_camera logic
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        bg_path = frame_dir / "background.png"
+        if bg_path.exists():
+            bg_img = cv2.imread(str(bg_path))
+            if bg_img is not None:
+                if K is not None:
+                    bg_img = cv2.undistort(bg_img, K, dist)
+                bg_gray = cv2.cvtColor(bg_img, cv2.COLOR_BGR2GRAY) if bg_img.ndim == 3 else bg_img
+                detection_img = cv2.absdiff(gray, bg_gray)
+            else:
+                detection_img = gray
+        else:
+            detection_img = gray
+
+        # Blob detection overlay
+        overlay = img.copy()
+        blurred = cv2.GaussianBlur(detection_img, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        n_lbl, labels, stats, centroids = cv2.connectedComponentsWithStats(
+            thresh, connectivity=8)
+        blobs = []
+        for lbl in range(1, n_lbl):
+            area = int(stats[lbl, cv2.CC_STAT_AREA])
+            if self._min_area <= area <= self._max_area:
+                blobs.append({
+                    "label": lbl,
+                    "area": area,
+                    "cx": int(centroids[lbl, 0]),
+                    "cy": int(centroids[lbl, 1]),
+                })
+        blobs.sort(key=lambda b: b["area"], reverse=True)
+        self._blobs = blobs
+
+        for i, blob in enumerate(blobs):
+            color = _BLOB_OVERLAY_COLORS[i % len(_BLOB_OVERLAY_COLORS)]
+            mask = (labels == blob["label"]).astype(np.uint8) * 255
+            cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(overlay, cnts, -1, color, 2)
+            cv2.circle(overlay, (blob["cx"], blob["cy"]), 15, color, 2)
+            cv2.putText(overlay, str(i + 1),
+                        (blob["cx"] + 8, blob["cy"] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+            cv2.putText(overlay, f"{blob['area']}px",
+                        (blob["cx"] + 8, blob["cy"] + 14),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
+        if not blobs:
+            cv2.putText(overlay, "No blobs found — adjust area limits",
+                        (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        self._frame_rgb = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self._canvas.delete("all")
+        if self._frame_rgb is None:
+            self._canvas.create_text(450, 300, text="No frame available",
+                                     fill="red", font=("", 14))
+            return
+
+        cw = self._canvas.winfo_width()
+        ch = self._canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return  # window not yet rendered; Configure event will re-trigger
+        h, w = self._frame_rgb.shape[:2]
+        scale = min(cw / w, ch / h)
+        self._scale = scale
+        dw, dh = int(w * scale), int(h * scale)
+        self._off_x = (cw - dw) // 2
+        self._off_y = (ch - dh) // 2
+
+        pil_img = Image.fromarray(self._frame_rgb).resize((dw, dh), Image.LANCZOS)
+        self._img_tk = ImageTk.PhotoImage(pil_img)
+        self._canvas.create_image(self._off_x, self._off_y, anchor="nw",
+                                  image=self._img_tk)
+
+        if self._click_pt is not None:
+            cx_img, cy_img = self._click_pt
+            cx_c = int(cx_img * scale) + self._off_x
+            cy_c = int(cy_img * scale) + self._off_y
+            r = 14
+            self._canvas.create_oval(cx_c - r, cy_c - r, cx_c + r, cy_c + r,
+                                     outline="#00ff00", width=2)
+            self._canvas.create_line(cx_c - r - 4, cy_c, cx_c + r + 4, cy_c,
+                                     fill="#00ff00", width=1)
+            self._canvas.create_line(cx_c, cy_c - r - 4, cx_c, cy_c + r + 4,
+                                     fill="#00ff00", width=1)
+
+    def _select_blob(self, blob: dict) -> None:
+        self._click_pt = (blob["cx"], blob["cy"])
+        self._coord_lbl.config(text=f"Blob {self._blobs.index(blob)+1}  ({blob['cx']}, {blob['cy']})")
+        self._next_btn.config(state="normal")
+        self._redraw()
+
+    def _on_click(self, event: tk.Event) -> None:
+        if self._frame_rgb is None:
+            return
+        ix = int((event.x - self._off_x) / self._scale)
+        iy = int((event.y - self._off_y) / self._scale)
+        h, w = self._frame_rgb.shape[:2]
+        if not (0 <= ix < w and 0 <= iy < h):
+            return
+        # Snap to nearest blob centroid if within 40 px; else free click
+        if self._blobs:
+            dists = [(ix - b["cx"])**2 + (iy - b["cy"])**2 for b in self._blobs]
+            nearest_idx = int(np.argmin(dists))
+            if dists[nearest_idx] <= 40**2:
+                self._select_blob(self._blobs[nearest_idx])
+                return
+        self._click_pt = (ix, iy)
+        self._coord_lbl.config(text=f"({ix}, {iy})")
+        self._next_btn.config(state="normal")
+        self._redraw()
+
+    def _on_key(self, event: tk.Event) -> None:
+        if event.char and event.char.isdigit():
+            idx = int(event.char) - 1
+            if 0 <= idx < len(self._blobs):
+                self._select_blob(self._blobs[idx])
+
+    def _next(self) -> None:
+        cam_id = self._cameras[self._cam_idx]["id"]
+        if self._click_pt is not None:
+            self._centers[cam_id] = list(self._click_pt)
+        if self._cam_idx + 1 < len(self._cameras):
+            self._load_camera(self._cam_idx + 1)
+        else:
+            self.result = self._centers
+            self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
 
 
 def _camera_source(idx: int) -> int:

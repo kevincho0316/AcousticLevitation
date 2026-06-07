@@ -18,25 +18,25 @@ cameras:
     focus: 0
 
   - id: cam_2
-    device_index: 4          # Brio 100 on usb-2.4 (/dev/video4)
+    device_index: 8          # Brio 100 on usb-2.4 (/dev/video4)
     intrinsics_file: calibration/cam_right_intrinsics.yaml
     capture_resolution: [1920, 1080]
     exposure: 156
     focus: 0
 
   - id: cam_3
-    device_index: 6          # Brio 100 on usb-2.3 (/dev/video6)
+    device_index: 5          # Brio 100 on usb-2.3 (/dev/video6)
     intrinsics_file: calibration/cam_back_intrinsics.yaml
     capture_resolution: [1920, 1080]
     exposure: 156
     focus: 0
 
-  - id: iphone_x 
-    device_index: 99          # iphone X for only box calibration 
-    intrinsics_file: calibration/iphone_x_intrinsics.yaml
-    capture_resolution: [4032, 3024]
-    exposure: 156
-    focus: 0
+#  - id: iphone_x 
+#    device_index: 99          # iphone X for only box calibration 
+#    intrinsics_file: calibration/iphone_x_intrinsics.yaml
+#    capture_resolution: [4032, 3024]
+#    exposure: 156
+#    focus: 0
 
 
 

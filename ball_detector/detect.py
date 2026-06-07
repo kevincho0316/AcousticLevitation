@@ -34,8 +34,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
 
 import cv2
 import numpy as np
@@ -355,6 +359,7 @@ def detect_ball_camera(
     roi_radius: int = 60,
     background_path: Path | None = None,
     use_median_background: bool = False,
+    seed_roi_center: tuple[int, int] | None = None,
 ) -> BallDetection2D:
     """Detect and temporally average the ball center across all frames.
 
@@ -386,9 +391,9 @@ def detect_ball_camera(
         else:
             print(f"  {intrinsics.camera_id}: WARN median background computation failed, proceeding without")
 
-    roi_center: tuple[int, int] | None = None
+    roi_center: tuple[int, int] | None = seed_roi_center
 
-    if interactive:
+    if interactive and roi_center is None:
         for path in frame_paths:
             img = cv2.imread(str(path))
             if img is None:
@@ -482,6 +487,7 @@ def detect_session(
     roi_radius: int = 60,
     background_path: Path | None = None,
     use_median_background: bool = False,
+    roi_centers: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, BallDetection2D]:
     cam_cfg = load_cameras_config(cameras_config_path)
     detections: dict[str, BallDetection2D] = {}
@@ -510,6 +516,7 @@ def detect_session(
         effective_bg = cam_bg_path if cam_bg_path.exists() else background_path
 
         print(f"\nDetecting ball in {cam_id} ({len(frame_paths)} frames) …")
+        seed = tuple(roi_centers[cam_id]) if roi_centers and cam_id in roi_centers else None
         try:
             det = detect_ball_camera(
                 frame_paths, intrinsics,
@@ -518,6 +525,7 @@ def detect_session(
                 interactive=interactive, roi_radius=roi_radius,
                 background_path=effective_bg,
                 use_median_background=use_median_background,
+                seed_roi_center=seed,
             )
             detections[cam_id] = det
             results_json["detections"][cam_id] = {
@@ -549,6 +557,9 @@ def _parse_args() -> argparse.Namespace:
                    help="Show each camera's first frame and let the user click the ball.")
     p.add_argument("--roi-radius", type=int, default=60,
                    help="Search window half-size (px) around the user-selected seed point.")
+    p.add_argument("--roi-centers", type=str, default=None, metavar="JSON",
+                   help='Pre-selected ROI centers as JSON: \'{"cam_1": [cx, cy], ...}\'. '
+                        'Skips interactive selection for cameras listed here.')
 
     bg_group = p.add_mutually_exclusive_group()
     bg_group.add_argument(
@@ -568,6 +579,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     output = args.output or (args.session / "ball_detections.json")
+    roi_centers = json.loads(args.roi_centers) if args.roi_centers else None
     detect_session(
         session_dir=args.session,
         cameras_config_path=args.cameras_config,
@@ -580,6 +592,7 @@ def main() -> None:
         roi_radius=args.roi_radius,
         background_path=args.background_frame,
         use_median_background=args.median_background,
+        roi_centers=roi_centers,
     )
 
 

@@ -158,7 +158,7 @@ def triangulate(
             X_approx = (R.T @ (Z_approx * uv_h - t)).reshape(1, 3).astype(np.float64)
             zeros_dist = np.zeros(5, dtype=np.float64)
             _, jac_pnp = _cv2.projectPoints(X_approx, rvec_pose, tvec_pose, K, zeros_dist)
-            J_pose_2x6 = jac_pnp[0, :, :6].astype(np.float64)  # (2,6) — columns: rvec then tvec
+            J_pose_2x6 = jac_pnp[:, :6].astype(np.float64)  # (2,6) — columns: rvec then tvec
             Sigma = Sigma + J_pose_2x6 @ pose.pose_covariance @ J_pose_2x6.T
 
         # Regularize to ensure invertibility.
