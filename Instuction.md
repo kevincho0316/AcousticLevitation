@@ -6,11 +6,6 @@
 
 One-time per camera. Only redo if you swap a lens, change resolution, or lose the calibration file.
 
-## What you need
-
-- A printed ChArUco board (generate with `python generate_charuco_sheet.py` — outputs a PDF).
-- 30–50 images of the board per camera, varied poses.
-
 ## Capture tips
 
 - **Cover the full field of view.** Tilt and slide the board to every corner and edge of the frame. Distortion is highest at the edges — if you only shoot center poses, it goes uncharacterized.
